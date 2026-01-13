@@ -1,7 +1,8 @@
 -- =============================================
 -- FTP文件处理系统 - 数据库初始化脚本
 -- 说明：此脚本会创建所有必需的表和索引
--- 执行顺序：按顺序执行，脚本会自动检查表是否存在
+-- 适用场景：新环境首次执行
+-- 执行顺序：按顺序执行，脚本会自动检查表是否存在（如果表已存在则跳过）
 -- =============================================
 
 PRINT '========================================';
@@ -106,45 +107,7 @@ BEGIN
 END
 ELSE
 BEGIN
-    PRINT '○ FileInfo表已存在';
-    
-    -- 如果表已存在，检查并添加Processed字段（兼容旧版本）
-    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[FileInfo]') AND name = 'Processed')
-    BEGIN
-        ALTER TABLE [dbo].[FileInfo] ADD [Processed] BIT NOT NULL DEFAULT 0;
-        PRINT '  → 已添加Processed字段';
-    END
-
-    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[FileInfo]') AND name = 'ProcessedTime')
-    BEGIN
-        ALTER TABLE [dbo].[FileInfo] ADD [ProcessedTime] DATETIME NULL;
-        PRINT '  → 已添加ProcessedTime字段';
-    END
-
-    IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_FileInfo_Processed' AND object_id = OBJECT_ID(N'[dbo].[FileInfo]'))
-    BEGIN
-        CREATE INDEX [idx_FileInfo_Processed] ON [dbo].[FileInfo]([Processed]);
-        PRINT '  → 已创建Processed索引';
-    END
-    
-    -- 修改Machine字段长度为500（如果当前长度小于500）
-    DECLARE @MachineMaxLength INT;
-    SELECT @MachineMaxLength = CHARACTER_MAXIMUM_LENGTH 
-    FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_NAME = 'FileInfo' AND COLUMN_NAME = 'Machine';
-    
-    IF @MachineMaxLength IS NOT NULL AND @MachineMaxLength < 500
-    BEGIN
-        ALTER TABLE [dbo].[FileInfo] ALTER COLUMN [Machine] NVARCHAR(500);
-        PRINT '  → 已修改Machine字段长度为500';
-    END
-    
-    -- 移除SourceFileName的唯一约束（如果存在）
-    IF EXISTS (SELECT * FROM sys.indexes WHERE name = 'UK_FileInfo' AND object_id = OBJECT_ID(N'[dbo].[FileInfo]'))
-    BEGIN
-        ALTER TABLE [dbo].[FileInfo] DROP CONSTRAINT [UK_FileInfo];
-        PRINT '  → 已移除SourceFileName的唯一约束';
-    END
+    PRINT '○ FileInfo表已存在，跳过创建';
 END
 
 -- =============================================
@@ -212,47 +175,7 @@ BEGIN
 END
 ELSE
 BEGIN
-    PRINT '○ FileData表已存在';
-    
-    -- 移除SourceFileName的唯一约束（如果存在）
-    IF EXISTS (SELECT * FROM sys.indexes WHERE name = 'UK_FileData' AND object_id = OBJECT_ID(N'[dbo].[FileData]'))
-    BEGIN
-        ALTER TABLE [dbo].[FileData] DROP CONSTRAINT [UK_FileData];
-        PRINT '  → 已移除FileData表的唯一约束';
-    END
-    
-    -- 添加FileInfoId字段（如果不存在）
-    IF NOT EXISTS (SELECT * FROM sys.columns WHERE object_id = OBJECT_ID(N'[dbo].[FileData]') AND name = 'FileInfoId')
-    BEGIN
-        ALTER TABLE [dbo].[FileData] ADD [FileInfoId] INT NULL;
-        PRINT '  → 已添加FileInfoId字段';
-        
-        -- 如果FileInfoId为NULL，尝试根据SourceFileName和ImportTime匹配FileInfo.Id
-        UPDATE fd
-        SET fd.FileInfoId = fi.Id
-        FROM [dbo].[FileData] fd
-        INNER JOIN [dbo].[FileInfo] fi ON fd.SourceFileName = fi.SourceFileName 
-            AND ABS(DATEDIFF(SECOND, fd.ImportTime, fi.ImportTime)) < 5  -- 5秒内的匹配
-        WHERE fd.FileInfoId IS NULL;
-        
-        -- 将FileInfoId设置为NOT NULL
-        ALTER TABLE [dbo].[FileData] ALTER COLUMN [FileInfoId] INT NOT NULL;
-        
-        -- 添加外键约束
-        IF NOT EXISTS (SELECT * FROM sys.foreign_keys WHERE name = 'FK_FileData_FileInfo' AND parent_object_id = OBJECT_ID(N'[dbo].[FileData]'))
-        BEGIN
-            ALTER TABLE [dbo].[FileData] ADD CONSTRAINT [FK_FileData_FileInfo] 
-                FOREIGN KEY ([FileInfoId]) REFERENCES [dbo].[FileInfo]([Id]) ON DELETE CASCADE;
-            PRINT '  → 已添加FileInfoId外键约束';
-        END
-        
-        -- 创建FileInfoId索引
-        IF NOT EXISTS (SELECT * FROM sys.indexes WHERE name = 'idx_FileData_FileInfoId' AND object_id = OBJECT_ID(N'[dbo].[FileData]'))
-        BEGIN
-            CREATE INDEX [idx_FileData_FileInfoId] ON [dbo].[FileData]([FileInfoId]);
-            PRINT '  → 已创建FileInfoId索引';
-        END
-    END
+    PRINT '○ FileData表已存在，跳过创建';
 END
 
 -- =============================================
@@ -404,6 +327,19 @@ BEGIN
         -- 描述：配置的详细说明
         -- 示例：'根据sn匹配，将Excel的InspectionResultPD值更新到QC_ProcessProgrammeRecordline'
         [Description] NVARCHAR(500),
+        
+        -- 自定义SQL模板：支持复杂JOIN查询的SQL模板（可选）
+        -- 如果使用自定义SQL模板，UseCustomSqlTemplate应设置为1
+        -- 支持占位符：{FileInfoId}, {PartName}, {ColumnName}, {RowNumber}, {ColumnValue}等
+        [CustomSqlTemplate] NVARCHAR(MAX),
+        
+        -- 是否使用自定义SQL模板：1=使用自定义SQL模板，0=使用标准映射
+        [UseCustomSqlTemplate] BIT NOT NULL DEFAULT 0,
+        
+        -- 模板参数：模板参数说明（JSON格式）
+        -- 示例：'{"ColumnName":"9. Results","RowNumber":"8"}'
+        -- 说明：当SQL模板包含{ColumnName}或{RowNumber}时，需要在此指定匹配条件
+        [TemplateParameters] NVARCHAR(MAX),
         
         -- 创建时间：配置创建的时间（自动记录）
         [CreateTime] DATETIME NOT NULL DEFAULT GETDATE(),
@@ -634,7 +570,6 @@ PRINT '  配置表：DataMappingConfig, SqlExecutionConfig, SqlExecutionLog';
 PRINT '';
 PRINT '提示：';
 PRINT '  - 如果表已存在，脚本会自动跳过创建';
-PRINT '  - 如果FileInfo表缺少Processed字段，脚本会自动添加';
 PRINT '  - 示例配置已插入到DataMappingConfig表';
 PRINT '  - 业务表（如QC_ProcessProgrammeRecordline）需要在业务数据库中已存在';
 PRINT '  - 通过DataMappingConfig配置将FileData数据映射到实际业务表';

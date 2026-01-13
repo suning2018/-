@@ -216,7 +216,7 @@ namespace FtpExcelProcessor
                         {
                             fileType = "PDF";
                             var pdfFileData = await pdfService.ReadPdfFileAsync(filePath);
-                            Console.WriteLine($"    读取到 {pdfFileData.Rows.Count} 条数据行");
+                            Console.WriteLine($"    读取到 {pdfFileData.DiagnosticData.Count} 条诊断数据");
                             await databaseService.SavePdfDataAsync(pdfFileData);
                             Console.WriteLine("    PDF数据已保存到数据库");
                             await LogInfoAsync("PDF数据已保存到数据库", "Database", "SavePdfData", fileName);

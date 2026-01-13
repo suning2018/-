@@ -196,25 +196,36 @@ FTP文件自动采集系统是一个基于.NET 8.0的控制台应用程序，用
 - `idx_SystemLog_Category` - 按日志分类查询
 
 #### 3.1.4 DataMappingConfig（数据映射配置表）
-存储数据映射规则配置。
+存储数据映射规则配置，支持标准映射和自定义SQL模板两种模式。
 
 | 字段名 | 类型 | 说明 | 约束 |
 |--------|------|------|------|
 | Id | INT | 主键，自增ID | PRIMARY KEY |
 | ConfigName | NVARCHAR(200) | 配置名称 | NOT NULL |
-| SourceFileType | NVARCHAR(50) | 源文件类型 | NOT NULL |
+| SourceTable | NVARCHAR(200) | 源表名（通常为FileData） | NOT NULL |
+| SourceFileType | NVARCHAR(50) | 源文件类型（Excel/PDF） | NULL |
+| SourceMatchField | NVARCHAR(200) | 源匹配字段（FileData的ColumnName） | NOT NULL |
+| SourceDataField | NVARCHAR(200) | 源数据字段（FileData的ColumnName） | NOT NULL |
 | TargetTable | NVARCHAR(200) | 目标表名 | NOT NULL |
 | TargetMatchField | NVARCHAR(200) | 目标匹配字段 | NOT NULL |
-| MappingRules | NVARCHAR(MAX) | 映射规则（JSON） | NOT NULL |
+| TargetUpdateField | NVARCHAR(200) | 目标更新字段 | NOT NULL |
+| MatchCondition | NVARCHAR(500) | 额外匹配条件（SQL WHERE子句） | NULL |
 | IsActive | BIT | 是否启用 | NOT NULL, DEFAULT 1 |
 | Description | NVARCHAR(500) | 描述 | NULL |
+| CustomSqlTemplate | NVARCHAR(MAX) | 自定义SQL模板（支持占位符） | NULL |
+| UseCustomSqlTemplate | BIT | 是否使用自定义SQL模板 | NOT NULL, DEFAULT 0 |
+| TemplateParameters | NVARCHAR(MAX) | 模板参数（JSON格式） | NULL |
 | CreateTime | DATETIME | 创建时间 | NOT NULL, DEFAULT GETDATE() |
 | UpdateTime | DATETIME | 更新时间 | NOT NULL, DEFAULT GETDATE() |
 
 **索引**：
-- `idx_DataMappingConfig_SourceFileType` - 按源文件类型查询
-- `idx_DataMappingConfig_TargetTable` - 按目标表查询
 - `idx_DataMappingConfig_IsActive` - 按启用状态查询
+- `idx_DataMappingConfig_SourceTable` - 按源表查询
+- `idx_DataMappingConfig_TargetTable` - 按目标表查询
+
+**说明**：
+- **标准映射模式**（UseCustomSqlTemplate = 0）：根据SourceMatchField和SourceDataField自动生成UPDATE语句
+- **自定义SQL模板模式**（UseCustomSqlTemplate = 1）：使用CustomSqlTemplate中的SQL模板，支持占位符替换
 
 #### 3.1.5 SqlExecutionConfig（SQL执行配置表）
 存储待执行的SQL语句配置。
@@ -562,39 +573,86 @@ FileInfo (1) ──────< (N) FileData
 
 ## 7. 数据映射配置
 
-### 7.1 DataMappingConfig表结构
+### 7.1 标准映射配置
 
-映射规则存储在`MappingRules`字段中，格式为JSON：
+标准映射配置通过以下字段定义映射规则：
 
-```json
-{
-  "MatchConditions": [
-    {
-      "SourceColumn": "PartNumber",
-      "Operator": "Equals",
-      "Value": "PART001"
-    }
-  ],
-  "FieldMappings": [
-    {
-      "SourceColumn": "SerialNumber",
-      "TargetColumn": "SN",
-      "DataType": "String"
-    },
-    {
-      "SourceColumn": "Results",
-      "TargetColumn": "Result",
-      "DataType": "String"
-    }
-  ]
-}
+- **SourceMatchField**：源匹配字段（FileData表的ColumnName），用于匹配数据行
+- **SourceDataField**：源数据字段（FileData表的ColumnName），要更新的数据值
+- **TargetTable**：目标业务表名
+- **TargetMatchField**：目标表的匹配字段，用于查找要更新的记录
+- **TargetUpdateField**：目标表的更新字段，要更新的字段名
+- **MatchCondition**：额外的匹配条件（SQL WHERE子句的一部分）
+
+**示例配置**：
+```sql
+INSERT INTO DataMappingConfig 
+(ConfigName, SourceTable, SourceFileType, SourceMatchField, SourceDataField,
+ TargetTable, TargetMatchField, TargetUpdateField, Description, IsActive)
+VALUES 
+('更新检验结果PD', 'FileData', 'Excel', 'sn', 'InspectionResultPD',
+ 'QC_ProcessProgrammeRecordline', 'sn', 'InspectionResultPD',
+ '根据sn匹配，将Excel的InspectionResultPD值更新到QC_ProcessProgrammeRecordline', 1);
 ```
 
-### 7.2 映射规则说明
+### 7.2 自定义SQL模板配置
 
-- **MatchConditions**：匹配条件，用于确定哪些数据行需要更新
-- **FieldMappings**：字段映射，定义源字段到目标字段的映射关系
-- **TargetMatchField**：目标表的匹配字段，用于确定更新哪条记录
+自定义SQL模板支持复杂的JOIN查询和灵活的SQL语句，通过以下字段配置：
+
+- **UseCustomSqlTemplate**：设置为1启用自定义SQL模板
+- **CustomSqlTemplate**：SQL模板，支持占位符
+- **TemplateParameters**：模板参数说明（JSON格式）
+
+**支持的占位符**：
+- `{FileInfoId}` - 文件信息ID
+- `{SourceFileName}` - 源文件名
+- `{PartName}` - 零件名称
+- `{PartNumber}` - 零件号
+- `{SerialNumber}` - 序列号
+- `{FileType}` - 文件类型
+- `{ColumnName}` - 列名（需要TemplateParameters指定）
+- `{RowNumber}` - 行号（需要TemplateParameters指定）
+- `{ColumnValue}` - 列值（需要TemplateParameters指定）
+
+**示例配置**：
+```sql
+INSERT INTO DataMappingConfig 
+(ConfigName, SourceTable, SourceFileType, SourceMatchField, SourceDataField,
+ TargetTable, TargetMatchField, TargetUpdateField, Description,
+ UseCustomSqlTemplate, CustomSqlTemplate, TemplateParameters, IsActive)
+VALUES 
+('更新QC记录_平面度检验结果',
+ 'FileData', 'Excel', 'PartName', '9. Results',
+ 'QC_ProcessProgrammeRecordline', 'sn', 'InspectionResultPD',
+ '根据PartName匹配，更新QC_ProcessProgrammeRecordline的InspectionResultPD字段',
+ 1,
+ N'UPDATE QC_ProcessProgrammeRecordline 
+SET InspectionResultPD = F.ColumnValue
+FROM (
+    SELECT fi.PartName, fd.RowNumber, fd.ColumnValue 
+    FROM FileData fd
+    LEFT JOIN FileInfo fi ON fd.FileInfoId = fi.Id 
+    WHERE fd.ColumnName = ''9. Results'' 
+      AND fd.RowNumber = 8
+      AND fd.FileInfoId = {FileInfoId}
+) F 
+JOIN (
+    SELECT qpl.Id, qpl.sn, qpl.InspectionItemName
+    FROM QC_ProcessProgrammeRecordline qpl  
+    LEFT JOIN QC_ProcessProgrammeRecord qpr ON qpl.ProcessProgrammeRecordId = qpr.Id 
+    WHERE qpl.InspectionItemName = ''精度检验：大底面平面度''
+) R ON F.PartName = R.sn
+WHERE QC_ProcessProgrammeRecordline.Id = R.Id',
+ N'{"ColumnName":"9. Results","RowNumber":"8"}',
+ 1);
+```
+
+### 7.3 映射规则说明
+
+- **标准映射**：适用于简单的字段更新，系统自动生成UPDATE语句
+- **自定义SQL模板**：适用于复杂的JOIN查询和多表关联更新
+- **匹配逻辑**：根据SourceMatchField的值在FileData中查找匹配的数据行
+- **更新逻辑**：将SourceDataField的值更新到目标表的TargetUpdateField字段
 
 ## 8. SQL执行配置
 
@@ -813,14 +871,37 @@ while (_isRunning)
 - 优化索引
 - 备份重要数据
 
-## 17.限制
+## 17. 限制和约束
 
-### 17.1 
+### 17.1 数据长度限制
 
-- SQL执行最多影响10条记录
-- 列名最大长度200字符
-- 列值最大长度10000字符（Excel），无限制（PDF）
+- SQL执行最多影响10条记录（使用SET ROWCOUNT 10限制）
+- ColumnName最大长度200字符（超过自动截断）
+- ColumnValue最大长度10000字符（Excel，超过自动截断），NVARCHAR(MAX)（PDF）
 - Machine字段最大长度500字符
+- SourceFileName最大长度500字符
+
+### 17.2 SQL执行限制
+
+- 只允许INSERT、UPDATE、DELETE、MERGE操作
+- 禁止DROP、TRUNCATE、ALTER、CREATE、EXEC、EXECUTE操作
+- UPDATE和DELETE必须包含WHERE子句
+- 所有SQL必须通过验证才能执行（ValidationEnabled强制为1）
+- 受影响行数限制为10条
+
+### 17.3 文件处理限制
+
+- 支持的文件类型：.xlsx, .xls, .pdf
+- Excel文件读取第3个工作表（索引2）
+- PDF文件支持Renishaw球杆仪诊断报告格式
+- 同名文件可以多次导入（不设置唯一约束）
+
+### 17.4 架构约束
+
+- 文件处理流程和SQL执行流程完全分离
+- 文件处理只生成SQL，不执行SQL
+- SQL执行是独立流程，从SqlExecutionConfig表读取并执行
+- FileInfo和FileData通过FileInfoId关联（外键，级联删除）
 
 ## 18. 版本历史
 
@@ -829,4 +910,140 @@ while (_isRunning)
 - 支持Excel和PDF文件处理
 - 支持数据映射和SQL执行
 - 持续监控模式
+- 读写分离架构（文件处理与SQL执行分离）
+- 自定义SQL模板支持
+- FileInfoId关联机制
+- 文件分类管理（成功/失败目录）
+- FTP文件下载后自动删除
+- Excel和PDF文件分目录存放
+
+## 19. 自定义SQL模板详细说明
+
+### 19.1 占位符说明
+
+| 占位符 | 说明 | 来源 |
+|--------|------|------|
+| {FileInfoId} | 文件信息ID | FileInfo表 |
+| {SourceFileName} | 源文件名 | FileInfo表 |
+| {PartName} | 零件名称 | FileInfo表 |
+| {PartNumber} | 零件号 | FileInfo表 |
+| {SerialNumber} | 序列号 | FileInfo表 |
+| {FileType} | 文件类型 | FileInfo表 |
+| {ColumnName} | 列名 | FileData表（需TemplateParameters指定） |
+| {RowNumber} | 行号 | FileData表（需TemplateParameters指定） |
+| {ColumnValue} | 列值 | FileData表（需TemplateParameters指定） |
+
+### 19.2 TemplateParameters格式
+
+当SQL模板包含`{ColumnName}`、`{RowNumber}`或`{ColumnValue}`占位符时，需要在TemplateParameters中指定匹配条件：
+
+```json
+{
+  "ColumnName": "9. Results",
+  "RowNumber": "8"
+}
+```
+
+系统会根据这些条件从FileData中查找匹配的数据行，然后替换占位符。
+
+### 19.3 处理流程
+
+1. 读取配置的CustomSqlTemplate
+2. 替换文件级占位符（{FileInfoId}, {SourceFileName}等）
+3. 如果包含行级占位符，解析TemplateParameters
+4. 从FileData中查找匹配的数据行
+5. 为每个匹配的数据行生成SQL（替换{ColumnName}, {RowNumber}, {ColumnValue}）
+6. 保存生成的SQL到SqlExecutionConfig表
+
+## 20. 常见问题
+
+### 20.1 文件处理失败
+
+**问题**：文件下载后处理失败，移动到失败目录
+
+**排查步骤**：
+1. 检查SystemLog表的错误日志
+2. 检查文件格式是否正确
+3. 检查数据库连接是否正常
+4. 检查FileData表是否有数据
+
+### 20.2 SQL执行失败
+
+**问题**：SQL配置执行失败
+
+**排查步骤**：
+1. 检查SqlExecutionLog表的错误信息
+2. 检查SQL语句是否正确
+3. 检查目标表是否存在
+4. 检查WHERE条件是否匹配到数据
+5. 检查受影响行数是否超过10条限制
+
+### 20.3 数据映射不生效
+
+**问题**：配置了映射规则，但数据没有更新到业务表
+
+**排查步骤**：
+1. 检查DataMappingConfig配置是否正确
+2. 检查IsActive是否为1
+3. 检查SourceMatchField和SourceDataField是否存在于FileData
+4. 检查是否生成了SQL（查看SqlExecutionConfig表）
+5. 检查SQL是否执行（查看SqlExecutionLog表）
+
+### 20.4 Machine字段未解析
+
+**问题**：PDF文件的Machine字段为空
+
+**排查步骤**：
+1. 检查PDF文件格式是否正确
+2. 检查PDF文本中是否包含"机器:"、"Machine:"或"设备:"关键字
+3. 查看日志中的Machine提取信息（Debug级别）
+
+## 21. 最佳实践
+
+### 21.1 配置管理
+
+- 使用有意义的ConfigName命名
+- 添加详细的Description说明
+- 先设置IsActive=0测试配置，确认无误后再启用
+- 定期检查未使用的配置并清理
+
+### 21.2 SQL编写
+
+- 使用参数化查询防止SQL注入
+- 确保WHERE条件足够精确，避免误更新
+- 测试SQL语句后再添加到配置
+- 使用自定义SQL模板处理复杂场景
+
+### 21.3 文件管理
+
+- 定期清理成功目录中的旧文件
+- 及时处理失败目录中的文件
+- 监控磁盘空间使用情况
+- 备份重要文件
+
+### 21.4 性能优化
+
+- 合理设置CheckIntervalSeconds，避免过于频繁的检查
+- 使用索引加速查询
+- 定期清理SystemLog和SqlExecutionLog旧数据
+- 监控数据库性能
+
+## 22. 附录
+
+### 22.1 数据库初始化脚本
+
+执行`Scripts/InitializeDatabase.sql`初始化数据库表结构。
+
+### 22.2 示例配置
+
+参考`Examples/`目录下的示例文件：
+- `CustomSqlTemplateExample.sql` - 自定义SQL模板配置示例
+- `ManualSqlInsertExamples.sql` - 手动SQL配置示例
+
+### 22.3 相关文档
+
+- `README.md` - 项目说明文档
+- `Examples/README_CUSTOM_SQL_TEMPLATE.md` - 自定义SQL模板使用说明
+- `Examples/README_MANUAL_SQL.md` - 手动SQL配置说明
+- `Scripts/README.md` - SQL脚本说明
 

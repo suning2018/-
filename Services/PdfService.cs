@@ -338,16 +338,6 @@ namespace FtpExcelProcessor.Services
         public string FileType { get; set; } = string.Empty;
         public Dictionary<string, string> HeaderInfo { get; set; } = new Dictionary<string, string>();
         public Dictionary<string, string> DiagnosticData { get; set; } = new Dictionary<string, string>();
-        public List<PdfRowData> Rows { get; set; } = new List<PdfRowData>();
-    }
-
-    /// <summary>
-    /// PDF行数据模型
-    /// </summary>
-    public class PdfRowData
-    {
-        public int RowNumber { get; set; }
-        public Dictionary<string, string> Columns { get; set; } = new Dictionary<string, string>();
     }
 }
 

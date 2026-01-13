@@ -14,16 +14,13 @@ namespace FtpExcelProcessor.Services
     /// </summary>
     public class DataProcessingService
     {
-        private readonly IConfiguration _configuration;
         private readonly ILogger<DataProcessingService> _logger;
         private readonly DatabaseLogService? _databaseLogService;
         private readonly string _connectionString;
         private readonly BusinessTableUpdateService? _businessTableUpdateService;
-        private readonly SqlExecutionService? _sqlExecutionService;
 
         public DataProcessingService(IConfiguration configuration, ILogger<DataProcessingService> logger, DatabaseLogService? databaseLogService = null)
         {
-            _configuration = configuration;
             _logger = logger;
             _databaseLogService = databaseLogService;
             _connectionString = configuration.GetConnectionString("SQLServer") 
@@ -35,224 +32,6 @@ namespace FtpExcelProcessor.Services
                 loggerFactory.CreateLogger<BusinessTableUpdateService>());
         }
 
-        /// <summary>
-        /// 处理所有未处理的数据
-        /// </summary>
-        public async Task ProcessAllDataAsync(DateTime? sinceDate = null)
-        {
-            try
-            {
-                _logger.LogInformation("开始处理数据，时间范围: {SinceDate}", sinceDate?.ToString() ?? "全部");
-
-                // 1. 处理Excel测量数据
-                await ProcessExcelDataAsync(sinceDate);
-
-                // 2. 处理PDF诊断数据
-                await ProcessPdfDataAsync(sinceDate);
-
-                _logger.LogInformation("数据处理完成");
-                if (_databaseLogService != null)
-                {
-                    await _databaseLogService.LogInformationAsync("数据处理完成", "DataProcessing", "ProcessAllData");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "处理数据时发生错误");
-                if (_databaseLogService != null)
-                {
-                    await _databaseLogService.LogErrorAsync("处理数据时发生错误", ex, "DataProcessing", "ProcessAllData");
-                }
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 处理Excel数据（更新到MeasurementData表）
-        /// </summary>
-        public async Task ProcessExcelDataAsync(DateTime? sinceDate = null)
-        {
-            try
-            {
-                _logger.LogInformation("开始处理Excel数据");
-
-                // 1. 获取需要处理的Excel文件列表
-                var excelFiles = await GetExcelFilesToProcessAsync(sinceDate);
-                _logger.LogInformation("找到 {Count} 个Excel文件需要处理", excelFiles.Count);
-
-                if (excelFiles.Count == 0)
-                {
-                    return;
-                }
-
-                // 2. 处理每个文件的数据
-                foreach (var fileInfo in excelFiles)
-                {
-                    await ProcessExcelFileAsync(fileInfo);
-                }
-
-                _logger.LogInformation("Excel数据处理完成，共处理 {Count} 个文件", excelFiles.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "处理Excel数据时发生错误");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 处理PDF数据（更新到DiagnosticData表）
-        /// </summary>
-        public async Task ProcessPdfDataAsync(DateTime? sinceDate = null)
-        {
-            try
-            {
-                _logger.LogInformation("开始处理PDF数据");
-
-                // 1. 获取需要处理的PDF文件列表
-                var pdfFiles = await GetPdfFilesToProcessAsync(sinceDate);
-                _logger.LogInformation("找到 {Count} 个PDF文件需要处理", pdfFiles.Count);
-
-                if (pdfFiles.Count == 0)
-                {
-                    return;
-                }
-
-                // 2. 处理每个文件的数据
-                foreach (var fileInfo in pdfFiles)
-                {
-                    await ProcessPdfFileAsync(fileInfo);
-                }
-
-                _logger.LogInformation("PDF数据处理完成，共处理 {Count} 个文件", pdfFiles.Count);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "处理PDF数据时发生错误");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// 获取需要处理的Excel文件列表（只获取未处理的数据）
-        /// </summary>
-        private async Task<List<FileInfoModel>> GetExcelFilesToProcessAsync(DateTime? sinceDate = null, bool onlyUnprocessed = true)
-        {
-            var files = new List<FileInfoModel>();
-
-            var sql = @"
-                SELECT Id, SourceFileName, PartNumber, PartName, SerialNumber, ImportTime
-                FROM FileInfo
-                WHERE FileType = 'Excel'";
-
-            // 只处理未处理的数据（读写分离）
-            if (onlyUnprocessed)
-            {
-                sql += " AND (Processed = 0 OR Processed IS NULL)";
-            }
-
-            if (sinceDate.HasValue)
-            {
-                sql += " AND ImportTime >= @SinceDate";
-            }
-
-            sql += " ORDER BY ImportTime ASC";
-
-            try
-            {
-                using var connection = new SqlConnection(_connectionString);
-                await connection.OpenAsync();
-
-                using var command = new SqlCommand(sql, connection);
-                if (sinceDate.HasValue)
-                {
-                    command.Parameters.AddWithValue("@SinceDate", sinceDate.Value);
-                }
-
-                using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    files.Add(new FileInfoModel
-                    {
-                        Id = reader.GetInt32("Id"),
-                        SourceFileName = reader.GetString("SourceFileName"),
-                        PartNumber = reader.IsDBNull("PartNumber") ? null : reader.GetString("PartNumber"),
-                        PartName = reader.IsDBNull("PartName") ? null : reader.GetString("PartName"),
-                        SerialNumber = reader.IsDBNull("SerialNumber") ? null : reader.GetString("SerialNumber"),
-                        ImportTime = reader.GetDateTime("ImportTime")
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "获取Excel文件列表失败");
-                throw;
-            }
-
-            return files;
-        }
-
-        /// <summary>
-        /// 获取需要处理的PDF文件列表（只获取未处理的数据）
-        /// </summary>
-        private async Task<List<PdfFileInfoModel>> GetPdfFilesToProcessAsync(DateTime? sinceDate = null, bool onlyUnprocessed = true)
-        {
-            var files = new List<PdfFileInfoModel>();
-
-            var sql = @"
-                SELECT Id, SourceFileName, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime
-                FROM FileInfo
-                WHERE FileType = 'PDF'";
-
-            // 只处理未处理的数据（读写分离）
-            if (onlyUnprocessed)
-            {
-                sql += " AND (Processed = 0 OR Processed IS NULL)";
-            }
-
-            if (sinceDate.HasValue)
-            {
-                sql += " AND ImportTime >= @SinceDate";
-            }
-
-            sql += " ORDER BY ImportTime ASC";
-
-            try
-            {
-                using var connection = new SqlConnection(_connectionString);
-                await connection.OpenAsync();
-
-                using var command = new SqlCommand(sql, connection);
-                if (sinceDate.HasValue)
-                {
-                    command.Parameters.AddWithValue("@SinceDate", sinceDate.Value);
-                }
-
-                using var reader = await command.ExecuteReaderAsync();
-                while (await reader.ReadAsync())
-                {
-                    files.Add(new PdfFileInfoModel
-                    {
-                        Id = reader.GetInt32(reader.GetOrdinal("Id")),
-                        SourceFileName = reader.GetString(reader.GetOrdinal("SourceFileName")),
-                        TestId = reader.IsDBNull(reader.GetOrdinal("TestId")) ? null : reader.GetString(reader.GetOrdinal("TestId")),
-                        Operator = reader.IsDBNull(reader.GetOrdinal("Operator")) ? null : reader.GetString(reader.GetOrdinal("Operator")),
-                        TestDate = reader.IsDBNull(reader.GetOrdinal("TestDate")) ? null : reader.GetString(reader.GetOrdinal("TestDate")),
-                        Machine = reader.IsDBNull(reader.GetOrdinal("Machine")) ? null : reader.GetString(reader.GetOrdinal("Machine")),
-                        QC20W = reader.IsDBNull(reader.GetOrdinal("QC20W")) ? null : reader.GetString(reader.GetOrdinal("QC20W")),
-                        LastCalibration = reader.IsDBNull(reader.GetOrdinal("LastCalibration")) ? null : reader.GetString(reader.GetOrdinal("LastCalibration")),
-                        ImportTime = reader.GetDateTime(reader.GetOrdinal("ImportTime"))
-                    });
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "获取PDF文件列表失败");
-                throw;
-            }
-
-            return files;
-        }
 
         /// <summary>
         /// 处理单个Excel文件的数据
@@ -272,21 +51,13 @@ namespace FtpExcelProcessor.Services
                     return;
                 }
 
-                // 2. 按行号分组数据
-                var groupedRows = fileDataRows
-                    .GroupBy(r => r.RowNumber)
-                    .OrderBy(g => g.Key)
-                    .ToList();
-
-                // 3. 根据配置规则更新业务表（生成SQL并存储，不执行）
-                // 数据直接通过DataMappingConfig映射到实际业务表，不再保存到中间表
+                // 2. 根据配置规则更新业务表（生成SQL并存储，不执行）
                 using var connection = new SqlConnection(_connectionString);
                 await connection.OpenAsync();
                 using var transaction = connection.BeginTransaction();
 
                 try
                 {
-                    // 根据配置规则更新业务表（生成SQL并存储，不执行）
                     if (_businessTableUpdateService != null)
                     {
                         await _businessTableUpdateService.UpdateBusinessTablesFromFileDataAsync(
@@ -296,15 +67,15 @@ namespace FtpExcelProcessor.Services
                             transaction);
                     }
 
-                    // 标记文件为已处理
-                    await MarkFileAsProcessedAsync(fileInfo.SourceFileName, connection, transaction);
-
+                    await MarkFileAsProcessedAsync(fileInfo.Id, connection, transaction);
                     transaction.Commit();
+                    
+                    var rowCount = fileDataRows.GroupBy(r => r.RowNumber).Count();
                     _logger.LogInformation("成功处理Excel文件: {FileName}, 共 {Count} 行数据", 
-                        fileInfo.SourceFileName, groupedRows.Count);
+                        fileInfo.SourceFileName, rowCount);
                     if (_databaseLogService != null)
                     {
-                        await _databaseLogService.LogInformationAsync($"成功处理Excel文件: {fileInfo.SourceFileName}, 共 {groupedRows.Count} 行数据", "DataProcessing", "ProcessExcelFile", fileName: fileInfo.SourceFileName);
+                        await _databaseLogService.LogInformationAsync($"成功处理Excel文件: {fileInfo.SourceFileName}, 共 {rowCount} 行数据", "DataProcessing", "ProcessExcelFile", fileName: fileInfo.SourceFileName);
                     }
                 }
                 catch (Exception ex)
@@ -338,7 +109,6 @@ namespace FtpExcelProcessor.Services
 
                 try
                 {
-                    // 根据配置规则更新业务表（生成SQL并存储，不执行）
                     if (_businessTableUpdateService != null)
                     {
                         await _businessTableUpdateService.UpdateBusinessTablesFromFileDataAsync(
@@ -348,9 +118,7 @@ namespace FtpExcelProcessor.Services
                             transaction);
                     }
 
-
-                    // 2. 标记文件为已处理
-                    await MarkFileAsProcessedAsync(fileInfo.SourceFileName, connection, transaction);
+                    await MarkFileAsProcessedAsync(fileInfo.Id, connection, transaction);
 
                     transaction.Commit();
                     _logger.LogInformation("成功处理PDF文件: {FileName}", fileInfo.SourceFileName);
@@ -415,17 +183,66 @@ namespace FtpExcelProcessor.Services
         }
 
         /// <summary>
-        /// 获取诊断数据字典
+        /// 标记文件为已处理
         /// </summary>
-        private async Task<Dictionary<string, string?>> GetDiagnosticDataAsync(string sourceFileName)
+        private async Task MarkFileAsProcessedAsync(int fileInfoId, SqlConnection connection, SqlTransaction transaction)
         {
-            var diagnosticData = new Dictionary<string, string?>();
-
             var sql = @"
-                SELECT ColumnName, ColumnValue
-                FROM FileData
-                WHERE SourceFileName = @SourceFileName
-                  AND ColumnName LIKE '%Percentage' OR ColumnName LIKE '%Value' OR ColumnName = 'Roundness'";
+                UPDATE FileInfo
+                SET Processed = 1, ProcessedTime = @ProcessedTime
+                WHERE Id = @FileInfoId";
+
+            var parameters = new Dictionary<string, object?>
+            {
+                { "@FileInfoId", fileInfoId },
+                { "@ProcessedTime", DateTime.Now }
+            };
+
+            await ExecuteNonQueryAsync(sql, parameters, connection, transaction);
+            _logger.LogDebug("标记文件为已处理: FileInfoId={FileInfoId}", fileInfoId);
+        }
+
+        /// <summary>
+        /// 处理所有未处理的数据
+        /// </summary>
+        public async Task ProcessUnprocessedDataAsync()
+        {
+            try
+            {
+                // 获取未处理的Excel文件
+                var excelFiles = await GetUnprocessedFilesAsync<FileInfoModel>("Excel");
+                foreach (var fileInfo in excelFiles)
+                {
+                    await ProcessExcelFileAsync(fileInfo);
+                }
+
+                // 获取未处理的PDF文件
+                var pdfFiles = await GetUnprocessedFilesAsync<PdfFileInfoModel>("PDF");
+                foreach (var fileInfo in pdfFiles)
+                {
+                    await ProcessPdfFileAsync(fileInfo);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "处理未处理数据时发生错误");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 获取未处理的文件列表
+        /// </summary>
+        private async Task<List<T>> GetUnprocessedFilesAsync<T>(string fileType) where T : class
+        {
+            var files = new List<T>();
+            var sql = $@"
+                SELECT Id, SourceFileName, PartNumber, PartName, SerialNumber, 
+                       TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime
+                FROM FileInfo
+                WHERE FileType = @FileType
+                  AND (Processed = 0 OR Processed IS NULL)
+                ORDER BY ImportTime ASC";
 
             try
             {
@@ -433,52 +250,49 @@ namespace FtpExcelProcessor.Services
                 await connection.OpenAsync();
 
                 using var command = new SqlCommand(sql, connection);
-                command.Parameters.AddWithValue("@SourceFileName", sourceFileName);
+                command.Parameters.AddWithValue("@FileType", fileType);
 
                 using var reader = await command.ExecuteReaderAsync();
                 while (await reader.ReadAsync())
                 {
-                    var columnName = reader.GetString(reader.GetOrdinal("ColumnName"));
-                    var columnValue = reader.IsDBNull(reader.GetOrdinal("ColumnValue")) ? null : reader.GetString(reader.GetOrdinal("ColumnValue"));
-                    diagnosticData[columnName] = columnValue;
+                    if (fileType == "Excel" && typeof(T) == typeof(FileInfoModel))
+                    {
+                        var fileInfo = new FileInfoModel
+                        {
+                            Id = reader.GetInt32(reader.GetOrdinal("Id")),
+                            SourceFileName = reader.GetString(reader.GetOrdinal("SourceFileName")),
+                            PartNumber = reader.IsDBNull(reader.GetOrdinal("PartNumber")) ? null : reader.GetString(reader.GetOrdinal("PartNumber")),
+                            PartName = reader.IsDBNull(reader.GetOrdinal("PartName")) ? null : reader.GetString(reader.GetOrdinal("PartName")),
+                            SerialNumber = reader.IsDBNull(reader.GetOrdinal("SerialNumber")) ? null : reader.GetString(reader.GetOrdinal("SerialNumber")),
+                            ImportTime = reader.GetDateTime(reader.GetOrdinal("ImportTime"))
+                        };
+                        files.Add((T)(object)fileInfo);
+                    }
+                    else if (fileType == "PDF" && typeof(T) == typeof(PdfFileInfoModel))
+                    {
+                        var fileInfo = new PdfFileInfoModel
+                        {
+                            Id = reader.GetInt32(reader.GetOrdinal("Id")),
+                            SourceFileName = reader.GetString(reader.GetOrdinal("SourceFileName")),
+                            TestId = reader.IsDBNull(reader.GetOrdinal("TestId")) ? null : reader.GetString(reader.GetOrdinal("TestId")),
+                            Operator = reader.IsDBNull(reader.GetOrdinal("Operator")) ? null : reader.GetString(reader.GetOrdinal("Operator")),
+                            TestDate = reader.IsDBNull(reader.GetOrdinal("TestDate")) ? null : reader.GetString(reader.GetOrdinal("TestDate")),
+                            Machine = reader.IsDBNull(reader.GetOrdinal("Machine")) ? null : reader.GetString(reader.GetOrdinal("Machine")),
+                            QC20W = reader.IsDBNull(reader.GetOrdinal("QC20W")) ? null : reader.GetString(reader.GetOrdinal("QC20W")),
+                            LastCalibration = reader.IsDBNull(reader.GetOrdinal("LastCalibration")) ? null : reader.GetString(reader.GetOrdinal("LastCalibration")),
+                            ImportTime = reader.GetDateTime(reader.GetOrdinal("ImportTime"))
+                        };
+                        files.Add((T)(object)fileInfo);
+                    }
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "获取诊断数据失败: {FileName}", sourceFileName);
+                _logger.LogError(ex, "获取未处理文件列表失败: FileType={FileType}", fileType);
                 throw;
             }
 
-            return diagnosticData;
-        }
-
-        /// <summary>
-        /// 标记文件为已处理
-        /// </summary>
-        private async Task MarkFileAsProcessedAsync(string sourceFileName, SqlConnection connection, SqlTransaction transaction)
-        {
-            var sql = @"
-                UPDATE FileInfo
-                SET Processed = 1, ProcessedTime = @ProcessedTime
-                WHERE SourceFileName = @SourceFileName";
-
-            var parameters = new Dictionary<string, object?>
-            {
-                { "@SourceFileName", sourceFileName },
-                { "@ProcessedTime", DateTime.Now }
-            };
-
-            await ExecuteNonQueryAsync(sql, parameters, connection, transaction);
-            _logger.LogDebug("标记文件为已处理: {FileName}", sourceFileName);
-        }
-
-
-        /// <summary>
-        /// 处理所有未处理的数据（读写分离专用方法）
-        /// </summary>
-        public async Task ProcessUnprocessedDataAsync(DateTime? sinceDate = null)
-        {
-            await ProcessAllDataAsync(sinceDate);
+            return files;
         }
 
         /// <summary>
