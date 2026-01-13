@@ -29,32 +29,10 @@ namespace FtpExcelProcessor.Services
             _connectionString = configuration.GetConnectionString("SQLServer") 
                 ?? throw new InvalidOperationException("数据库连接字符串未配置");
             
-            // 初始化SQL执行服务（先初始化，因为BusinessTableUpdateService需要它）
-            var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
-            _sqlExecutionService = new SqlExecutionService(
-                configuration,
-                loggerFactory.CreateLogger<SqlExecutionService>(),
-                databaseLogService);
-            
             // 初始化业务表更新服务
+            var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
             _businessTableUpdateService = new BusinessTableUpdateService(
-                configuration,
-                loggerFactory.CreateLogger<BusinessTableUpdateService>(),
-                databaseLogService,
-                _sqlExecutionService);
-            
-            InitializeTargetTables();
-        }
-
-        /// <summary>
-        /// 初始化目标表结构
-        /// 注意：不再创建中间业务表，数据直接通过DataMappingConfig映射到实际业务表
-        /// </summary>
-        private void InitializeTargetTables()
-        {
-            // 已移除 MeasurementData 和 DiagnosticData 表的创建
-            // 数据将通过 DataMappingConfig 配置直接映射到实际业务表
-            _logger.LogInformation("使用实际业务表，通过DataMappingConfig配置映射数据");
+                loggerFactory.CreateLogger<BusinessTableUpdateService>());
         }
 
         /// <summary>

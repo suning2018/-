@@ -13,24 +13,11 @@ namespace FtpExcelProcessor.Services
     /// </summary>
     public class BusinessTableUpdateService
     {
-        private readonly IConfiguration _configuration;
         private readonly ILogger<BusinessTableUpdateService> _logger;
-        private readonly DatabaseLogService? _databaseLogService;
-        private readonly string _connectionString;
-        private readonly SqlExecutionService? _sqlExecutionService;
 
-        public BusinessTableUpdateService(
-            IConfiguration configuration,
-            ILogger<BusinessTableUpdateService> logger,
-            DatabaseLogService? databaseLogService = null,
-            SqlExecutionService? sqlExecutionService = null)
+        public BusinessTableUpdateService(ILogger<BusinessTableUpdateService> logger)
         {
-            _configuration = configuration;
             _logger = logger;
-            _databaseLogService = databaseLogService;
-            _sqlExecutionService = sqlExecutionService;
-            _connectionString = configuration.GetConnectionString("SQLServer")
-                ?? throw new InvalidOperationException("数据库连接字符串未配置");
         }
 
         /// <summary>
@@ -64,16 +51,36 @@ namespace FtpExcelProcessor.Services
                     return;
                 }
 
-                // 3. 按配置规则分组处理
-                var configGroups = mappingConfigs.GroupBy(c => new { c.TargetTable, c.TargetMatchField });
+                // 3. 按配置规则分组处理（区分自定义SQL模板和标准映射）
+                var standardConfigs = mappingConfigs.Where(c => !c.UseCustomSqlTemplate).ToList();
+                var customConfigs = mappingConfigs.Where(c => c.UseCustomSqlTemplate).ToList();
 
-                foreach (var configGroup in configGroups)
+                // 处理标准映射配置
+                if (standardConfigs.Count > 0)
                 {
-                    await ProcessMappingConfigGroupAsync(
-                        configGroup.ToList(),
-                        fileDataRows,
-                        connection,
-                        transaction);
+                    var standardGroups = standardConfigs.GroupBy(c => new { c.TargetTable, c.TargetMatchField });
+                    foreach (var configGroup in standardGroups)
+                    {
+                        await ProcessMappingConfigGroupAsync(
+                            configGroup.ToList(),
+                            fileDataRows,
+                            connection,
+                            transaction);
+                    }
+                }
+
+                // 处理自定义SQL模板配置
+                if (customConfigs.Count > 0)
+                {
+                    foreach (var config in customConfigs)
+                    {
+                        await ProcessCustomSqlTemplateAsync(
+                            config,
+                            fileInfoId,
+                            fileDataRows,
+                            connection,
+                            transaction);
+                    }
                 }
             }
             catch (Exception ex)
@@ -95,7 +102,8 @@ namespace FtpExcelProcessor.Services
 
             var sql = @"
                 SELECT Id, ConfigName, SourceTable, SourceFileType, SourceMatchField, SourceDataField,
-                       TargetTable, TargetMatchField, TargetUpdateField, MatchCondition, Description
+                       TargetTable, TargetMatchField, TargetUpdateField, MatchCondition, Description,
+                       CustomSqlTemplate, UseCustomSqlTemplate, TemplateParameters
                 FROM DataMappingConfig
                 WHERE IsActive = 1
                   AND SourceTable = 'FileData'
@@ -122,7 +130,10 @@ namespace FtpExcelProcessor.Services
                         TargetMatchField = reader.GetString(reader.GetOrdinal("TargetMatchField")),
                         TargetUpdateField = reader.GetString(reader.GetOrdinal("TargetUpdateField")),
                         MatchCondition = reader.IsDBNull(reader.GetOrdinal("MatchCondition")) ? null : reader.GetString(reader.GetOrdinal("MatchCondition")),
-                        Description = reader.IsDBNull(reader.GetOrdinal("Description")) ? null : reader.GetString(reader.GetOrdinal("Description"))
+                        Description = reader.IsDBNull(reader.GetOrdinal("Description")) ? null : reader.GetString(reader.GetOrdinal("Description")),
+                        CustomSqlTemplate = reader.IsDBNull(reader.GetOrdinal("CustomSqlTemplate")) ? null : reader.GetString(reader.GetOrdinal("CustomSqlTemplate")),
+                        UseCustomSqlTemplate = !reader.IsDBNull(reader.GetOrdinal("UseCustomSqlTemplate")) && reader.GetBoolean(reader.GetOrdinal("UseCustomSqlTemplate")),
+                        TemplateParameters = reader.IsDBNull(reader.GetOrdinal("TemplateParameters")) ? null : reader.GetString(reader.GetOrdinal("TemplateParameters"))
                     });
                 }
             }
@@ -254,19 +265,46 @@ namespace FtpExcelProcessor.Services
 
                 // 不执行SQL，只生成并存储SQL到数据库
                 // 保存SQL到SqlExecutionConfig表
-                if (_sqlExecutionService != null && configs.Count > 0)
-                {
-                    await SaveMappingSqlToConfigAsync(configs, updateSql, allParameters, targetTable, matchValue, connection, transaction);
-                    _logger.LogInformation(
-                        "已生成SQL并存储: 目标表={TargetTable}，匹配值={MatchValue}，更新字段={UpdateFields}",
-                        targetTable, matchValue, string.Join(", ", updateFields.Select(f => f.Split('=')[0].Trim())));
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "未配置SQL执行服务，无法存储SQL: 表={TargetTable}，匹配字段={MatchField}，匹配值={MatchValue}",
-                        targetTable, targetMatchField, matchValue);
-                }
+                await SaveMappingSqlToConfigAsync(configs, updateSql, allParameters, targetTable, matchValue, connection, transaction);
+                _logger.LogInformation(
+                    "已生成SQL并存储: 目标表={TargetTable}，匹配值={MatchValue}，更新字段={UpdateFields}",
+                    targetTable, matchValue, string.Join(", ", updateFields.Select(f => f.Split('=')[0].Trim())));
+            }
+        }
+
+        /// <summary>
+        /// 保存SQL到配置表
+        /// </summary>
+        private async Task SaveSqlToConfigAsync(
+            string configName,
+            string sql,
+            string parametersJson,
+            string description,
+            SqlConnection connection,
+            SqlTransaction transaction)
+        {
+            try
+            {
+                var sqlInsert = @"
+                    INSERT INTO SqlExecutionConfig 
+                    (ConfigName, SqlType, SqlStatement, Parameters, Description, 
+                     IsActive, ExecutionOrder, ValidationEnabled)
+                    VALUES 
+                    (@ConfigName, 'Mapping', @SqlStatement, @Parameters, @Description,
+                     1, 0, 1)";
+
+                using var command = new SqlCommand(sqlInsert, connection, transaction);
+                command.Parameters.AddWithValue("@ConfigName", configName);
+                command.Parameters.AddWithValue("@SqlStatement", sql);
+                command.Parameters.AddWithValue("@Parameters", parametersJson);
+                command.Parameters.AddWithValue("@Description", description);
+
+                await command.ExecuteNonQueryAsync();
+                _logger.LogDebug("已保存SQL到配置表: {ConfigName}", configName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "保存SQL到配置表失败: {ConfigName}", configName);
             }
         }
 
@@ -282,37 +320,207 @@ namespace FtpExcelProcessor.Services
             SqlConnection connection,
             SqlTransaction transaction)
         {
+            var configName = $"Mapping_{targetTable}_{configs[0].TargetMatchField}_{matchValue}_{DateTime.Now:yyyyMMddHHmmss}";
+            var parametersJson = System.Text.Json.JsonSerializer.Serialize(parameters);
+            var description = $"自动生成的映射SQL: {string.Join(", ", configs.Select(c => c.Description))}, 匹配值={matchValue}";
+            
+            await SaveSqlToConfigAsync(configName, sql, parametersJson, description, connection, transaction);
+        }
+
+        /// <summary>
+        /// 处理自定义SQL模板配置
+        /// </summary>
+        private async Task ProcessCustomSqlTemplateAsync(
+            DataMappingConfigModel config,
+            int fileInfoId,
+            List<FileDataRowModel> fileDataRows,
+            SqlConnection connection,
+            SqlTransaction transaction)
+        {
+            if (string.IsNullOrWhiteSpace(config.CustomSqlTemplate))
+            {
+                _logger.LogWarning("配置 {ConfigName} 启用了自定义SQL模板，但模板为空", config.ConfigName);
+                return;
+            }
+
             try
             {
-                // 为每行数据生成唯一的配置名称（包含匹配值）
-                var configName = $"Mapping_{targetTable}_{configs[0].TargetMatchField}_{matchValue}_{DateTime.Now:yyyyMMddHHmmss}";
-                var parametersJson = System.Text.Json.JsonSerializer.Serialize(parameters);
-                var description = $"自动生成的映射SQL: {string.Join(", ", configs.Select(c => c.Description))}, 匹配值={matchValue}";
+                // 获取FileInfo信息（用于替换占位符）
+                var fileInfo = await GetFileInfoAsync(fileInfoId, connection, transaction);
+                if (fileInfo == null)
+                {
+                    _logger.LogWarning("无法获取FileInfo信息: FileInfoId={FileInfoId}", fileInfoId);
+                    return;
+                }
 
-                // 直接插入新的SQL记录（不检查是否存在，因为每行数据都需要独立的SQL）
-                // 注意：ValidationEnabled 强制设置为 1（所有SQL都必须验证）
-                var sqlInsert = @"
-                    INSERT INTO SqlExecutionConfig 
-                    (ConfigName, SqlType, SqlStatement, Parameters, Description, 
-                     IsActive, ExecutionOrder, ValidationEnabled)
-                    VALUES 
-                    (@ConfigName, 'Mapping', @SqlStatement, @Parameters, @Description,
-                     1, 0, 1)";
+                // 替换SQL模板中的占位符
+                var sql = ReplacePlaceholders(config.CustomSqlTemplate, fileInfoId, fileInfo);
 
-                using var insertCommand = new SqlCommand(sqlInsert, connection, transaction);
-                insertCommand.Parameters.AddWithValue("@ConfigName", configName);
-                insertCommand.Parameters.AddWithValue("@SqlStatement", sql);
-                insertCommand.Parameters.AddWithValue("@Parameters", parametersJson);
-                insertCommand.Parameters.AddWithValue("@Description", description);
+                // 如果模板中包含 {ColumnName} 或 {RowNumber}，需要为每个匹配的数据行生成SQL
+                if (config.CustomSqlTemplate.Contains("{ColumnName}") || config.CustomSqlTemplate.Contains("{RowNumber}"))
+                {
+                    var templateParams = ParseTemplateParameters(config.TemplateParameters);
+                    var matchingRows = GetMatchingRows(fileDataRows, templateParams);
 
-                await insertCommand.ExecuteNonQueryAsync();
-                _logger.LogDebug("已保存映射SQL到配置表: {ConfigName}", configName);
+                    if (matchingRows.Count == 0)
+                    {
+                        _logger.LogDebug("配置 {ConfigName} 没有找到匹配的数据行", config.ConfigName);
+                        return;
+                    }
+
+                    foreach (var row in matchingRows)
+                    {
+                        var rowSql = ReplaceRowPlaceholders(sql, row);
+                        await SaveCustomSqlToConfigAsync(config, rowSql, fileInfoId, row, connection, transaction);
+                    }
+                }
+                else
+                {
+                    await SaveCustomSqlToConfigAsync(config, sql, fileInfoId, null, connection, transaction);
+                }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "保存映射SQL到配置表失败");
+                _logger.LogError(ex, "处理自定义SQL模板失败: ConfigName={ConfigName}", config.ConfigName);
             }
         }
+
+        /// <summary>
+        /// 获取FileInfo信息
+        /// </summary>
+        private async Task<FileInfoForTemplateModel?> GetFileInfoAsync(int fileInfoId, SqlConnection connection, SqlTransaction transaction)
+        {
+            var sql = @"
+                SELECT SourceFileName, FileType, PartNumber, PartName, SerialNumber
+                FROM FileInfo
+                WHERE Id = @FileInfoId";
+
+            using var command = new SqlCommand(sql, connection, transaction);
+            command.Parameters.AddWithValue("@FileInfoId", fileInfoId);
+
+            using var reader = await command.ExecuteReaderAsync();
+            if (!await reader.ReadAsync())
+            {
+                return null;
+            }
+
+            return new FileInfoForTemplateModel
+            {
+                SourceFileName = reader.IsDBNull(reader.GetOrdinal("SourceFileName")) ? null : reader.GetString(reader.GetOrdinal("SourceFileName")),
+                FileType = reader.IsDBNull(reader.GetOrdinal("FileType")) ? null : reader.GetString(reader.GetOrdinal("FileType")),
+                PartNumber = reader.IsDBNull(reader.GetOrdinal("PartNumber")) ? null : reader.GetString(reader.GetOrdinal("PartNumber")),
+                PartName = reader.IsDBNull(reader.GetOrdinal("PartName")) ? null : reader.GetString(reader.GetOrdinal("PartName")),
+                SerialNumber = reader.IsDBNull(reader.GetOrdinal("SerialNumber")) ? null : reader.GetString(reader.GetOrdinal("SerialNumber"))
+            };
+        }
+
+        /// <summary>
+        /// 替换SQL模板中的占位符
+        /// </summary>
+        private string ReplacePlaceholders(string template, int fileInfoId, FileInfoForTemplateModel fileInfo)
+        {
+            return template
+                .Replace("{FileInfoId}", fileInfoId.ToString())
+                .Replace("{SourceFileName}", fileInfo.SourceFileName ?? "")
+                .Replace("{PartName}", fileInfo.PartName ?? "")
+                .Replace("{PartNumber}", fileInfo.PartNumber ?? "")
+                .Replace("{SerialNumber}", fileInfo.SerialNumber ?? "")
+                .Replace("{FileType}", fileInfo.FileType ?? "");
+        }
+
+        /// <summary>
+        /// 解析模板参数（JSON格式）
+        /// </summary>
+        private Dictionary<string, string>? ParseTemplateParameters(string? templateParameters)
+        {
+            if (string.IsNullOrWhiteSpace(templateParameters))
+            {
+                return null;
+            }
+
+            try
+            {
+                return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(templateParameters);
+            }
+            catch
+            {
+                _logger.LogWarning("解析模板参数失败: {TemplateParameters}", templateParameters);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// 获取匹配的数据行
+        /// </summary>
+        private List<FileDataRowModel> GetMatchingRows(List<FileDataRowModel> fileDataRows, Dictionary<string, string>? templateParams)
+        {
+            string? requiredColumnName = null;
+            int? requiredRowNumber = null;
+
+            if (templateParams != null)
+            {
+                templateParams.TryGetValue("ColumnName", out requiredColumnName);
+                if (templateParams.TryGetValue("RowNumber", out var rowNumStr) && int.TryParse(rowNumStr, out var rowNum))
+                {
+                    requiredRowNumber = rowNum;
+                }
+            }
+
+            return fileDataRows.Where(r =>
+                (requiredColumnName == null || r.ColumnName == requiredColumnName) &&
+                (requiredRowNumber == null || r.RowNumber == requiredRowNumber)
+            ).ToList();
+        }
+
+        /// <summary>
+        /// 替换行相关的占位符
+        /// </summary>
+        private string ReplaceRowPlaceholders(string sql, FileDataRowModel row)
+        {
+            return sql
+                .Replace("{ColumnName}", row.ColumnName ?? "")
+                .Replace("{RowNumber}", row.RowNumber.ToString())
+                .Replace("{ColumnValue}", row.ColumnValue ?? "");
+        }
+
+        /// <summary>
+        /// 保存自定义SQL到配置表
+        /// </summary>
+        private async Task SaveCustomSqlToConfigAsync(
+            DataMappingConfigModel config,
+            string sql,
+            int fileInfoId,
+            FileDataRowModel? row,
+            SqlConnection connection,
+            SqlTransaction transaction)
+        {
+            var configName = $"CustomTemplate_{config.ConfigName}_{fileInfoId}";
+            if (row != null)
+            {
+                configName += $"_{row.RowNumber}_{row.ColumnName}";
+            }
+            configName += $"_{DateTime.Now:yyyyMMddHHmmss}";
+
+            var description = config.Description ?? $"自定义SQL模板: {config.ConfigName}";
+            if (row != null)
+            {
+                description += $", RowNumber={row.RowNumber}, ColumnName={row.ColumnName}";
+            }
+
+            await SaveSqlToConfigAsync(configName, sql, "{}", description, connection, transaction);
+        }
+    }
+
+    /// <summary>
+    /// FileInfo模型（用于自定义SQL模板）
+    /// </summary>
+    public class FileInfoForTemplateModel
+    {
+        public string? SourceFileName { get; set; }
+        public string? FileType { get; set; }
+        public string? PartNumber { get; set; }
+        public string? PartName { get; set; }
+        public string? SerialNumber { get; set; }
     }
 
     /// <summary>
@@ -331,6 +539,9 @@ namespace FtpExcelProcessor.Services
         public string TargetUpdateField { get; set; } = string.Empty;
         public string? MatchCondition { get; set; }
         public string? Description { get; set; }
+        public string? CustomSqlTemplate { get; set; }
+        public bool UseCustomSqlTemplate { get; set; }
+        public string? TemplateParameters { get; set; }
     }
 
 }
