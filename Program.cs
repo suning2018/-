@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
@@ -9,7 +8,6 @@ using Microsoft.Extensions.Logging;
 using Serilog;
 using Serilog.Extensions.Logging;
 using FtpExcelProcessor.Services;
-using Microsoft.Data.SqlClient;
 using System.Text.Json;
 
 namespace FtpExcelProcessor
@@ -160,17 +158,13 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task ProcessFtpFilesAsync()
         {
-            if (!await _processingLock.WaitAsync(0))
+            if (!await _processingLock.WaitAsync(0) || _configuration == null || _loggerFactory == null)
             {
-                return; // 有其他任务在执行，跳过
+                return;
             }
 
             try
             {
-                if (_configuration == null || _loggerFactory == null)
-                {
-                    return;
-                }
 
                 var ftpService = new FtpService(_configuration, _loggerFactory.CreateLogger<FtpService>(), _databaseLogService);
                 var excelService = new ExcelService(_loggerFactory.CreateLogger<ExcelService>(), _databaseLogService);
@@ -192,75 +186,7 @@ namespace FtpExcelProcessor
                 // 处理每个文件
                 foreach (var filePath in downloadedFiles)
                 {
-                    var fileName = Path.GetFileName(filePath);
-                    var extension = Path.GetExtension(filePath).ToLower();
-                    string fileType = "";
-                    bool isSuccess = false;
-                    
-                    try
-                    {
-                        Console.WriteLine($"  处理文件: {fileName}");
-                        await LogInfoAsync($"正在处理文件: {fileName}", "FileProcessing", "ProcessFile", fileName);
-                        
-                        if (extension == ".xlsx" || extension == ".xls")
-                        {
-                            fileType = "Excel";
-                            var excelFileData = await excelService.ReadExcelFileAsync(filePath);
-                            Console.WriteLine($"    读取到 {excelFileData.Rows.Count} 条数据行");
-                            await databaseService.SaveExcelDataAsync(excelFileData);
-                            Console.WriteLine("    Excel数据已保存到数据库");
-                            await LogInfoAsync("Excel数据已保存到数据库", "Database", "SaveExcelData", fileName);
-                            isSuccess = true;
-                        }
-                        else if (extension == ".pdf")
-                        {
-                            fileType = "PDF";
-                            var pdfFileData = await pdfService.ReadPdfFileAsync(filePath);
-                            Console.WriteLine($"    读取到 {pdfFileData.DiagnosticData.Count} 条诊断数据");
-                            await databaseService.SavePdfDataAsync(pdfFileData);
-                            Console.WriteLine("    PDF数据已保存到数据库");
-                            await LogInfoAsync("PDF数据已保存到数据库", "Database", "SavePdfData", fileName);
-                            isSuccess = true;
-                        }
-                        else
-                        {
-                            Console.WriteLine($"    不支持的文件格式: {extension}");
-                            await LogWarningAsync($"不支持的文件格式: {extension}", "FileProcessing", "ProcessFile", fileName);
-                            // 不支持的文件格式，不移动文件，保留在下载目录
-                            continue;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"    处理文件失败: {fileName}, 错误: {ex.Message}");
-                        await LogErrorAsync($"处理文件失败: {fileName}", ex, "FileProcessing", "ProcessFile", fileName);
-                        isSuccess = false;
-                    }
-                    finally
-                    {
-                        // 根据处理结果移动文件到相应目录
-                        if (!string.IsNullOrEmpty(fileType))
-                        {
-                            try
-                            {
-                                if (isSuccess)
-                                {
-                                    var targetPath = await fileClassificationService.MoveToSuccessAsync(filePath, fileType);
-                                    Console.WriteLine($"    文件已移动到成功目录: {targetPath}");
-                                }
-                                else
-                                {
-                                    var targetPath = await fileClassificationService.MoveToFailedAsync(filePath, fileType);
-                                    Console.WriteLine($"    文件已移动到失败目录: {targetPath}");
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"    移动文件失败: {ex.Message}");
-                                await LogErrorAsync($"移动文件失败: {fileName}", ex, "FileClassification", "MoveFile", fileName);
-                            }
-                        }
-                    }
+                    await ProcessSingleFileAsync(filePath, excelService, pdfService, databaseService, fileClassificationService);
                 }
                 Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 文件处理完成\n");
             }
@@ -275,17 +201,13 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task ProcessDataMappingAsync()
         {
-            if (!await _processingLock.WaitAsync(0))
+            if (!await _processingLock.WaitAsync(0) || _configuration == null || _loggerFactory == null)
             {
-                return; // 有其他任务在执行，跳过
+                return;
             }
 
             try
             {
-                if (_configuration == null || _loggerFactory == null)
-                {
-                    return;
-                }
 
                 var dataProcessingService = new DataProcessingService(
                     _configuration,
@@ -316,59 +238,22 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task ProcessSqlExecutionAsync()
         {
-            if (!await _processingLock.WaitAsync(0))
+            if (!await _processingLock.WaitAsync(0) || _configuration == null || _loggerFactory == null)
             {
-                return; // 有其他任务在执行，跳过
+                return;
             }
 
             try
             {
-                if (_configuration == null || _loggerFactory == null)
-                {
-                    return;
-                }
-
                 var sqlExecutionService = new SqlExecutionService(
                     _configuration,
                     _loggerFactory.CreateLogger<SqlExecutionService>(),
                     _databaseLogService);
 
-                var connectionString = _configuration.GetConnectionString("SQLServer");
-                if (string.IsNullOrWhiteSpace(connectionString))
-                {
-                    return;
-                }
-
-                using var connection = new SqlConnection(connectionString);
-                await connection.OpenAsync();
-
-                // 获取待执行的SQL配置（支持所有类型的SQL，包括手动插入的）
-                var sql = @"
-                    SELECT Id, ConfigName, SqlStatement, Parameters
-                    FROM SqlExecutionConfig 
-                    WHERE IsActive = 1
-                      AND (LastExecuteTime IS NULL OR ExecuteCount = 0)
-                    ORDER BY ExecutionOrder, Id";
-
-                var sqlConfigs = new List<(int Id, string ConfigName, string SqlStatement, string? Parameters)>();
-
-                using (var command = new SqlCommand(sql, connection))
-                {
-                    using var reader = await command.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        sqlConfigs.Add((
-                            reader.GetInt32(reader.GetOrdinal("Id")),
-                            reader.GetString(reader.GetOrdinal("ConfigName")),
-                            reader.GetString(reader.GetOrdinal("SqlStatement")),
-                            reader.IsDBNull(reader.GetOrdinal("Parameters")) ? null : reader.GetString(reader.GetOrdinal("Parameters"))
-                        ));
-                    }
-                }
-
+                var sqlConfigs = await sqlExecutionService.GetPendingSqlConfigsAsync();
                 if (sqlConfigs.Count == 0)
                 {
-                    return; // 没有待执行的SQL
+                    return;
                 }
 
                 Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现 {sqlConfigs.Count} 条待执行的SQL，开始执行...");
@@ -383,7 +268,6 @@ namespace FtpExcelProcessor
                     {
                         Console.WriteLine($"  执行SQL: {configName}");
 
-                        // 解析参数
                         Dictionary<string, object?>? parameters = null;
                         if (!string.IsNullOrWhiteSpace(parametersJson))
                         {
@@ -397,7 +281,6 @@ namespace FtpExcelProcessor
                             }
                         }
 
-                        // 校验SQL
                         var (isValid, errorMessage) = await sqlExecutionService.ValidateSqlAsync(sqlStatement, parameters);
                         if (!isValid)
                         {
@@ -406,7 +289,6 @@ namespace FtpExcelProcessor
                             continue;
                         }
 
-                        // 执行SQL
                         var (success, message, rowsAffected) = await sqlExecutionService.ExecuteSqlConfigByIdAsync(id, parameters);
                         if (success)
                         {
@@ -475,6 +357,79 @@ namespace FtpExcelProcessor
         }
 
         /// <summary>
+        /// 处理单个文件
+        /// </summary>
+        static async Task ProcessSingleFileAsync(
+            string filePath,
+            ExcelService excelService,
+            PdfService pdfService,
+            DatabaseService databaseService,
+            FileClassificationService fileClassificationService)
+        {
+            var fileName = Path.GetFileName(filePath);
+            var extension = Path.GetExtension(filePath).ToLower();
+            string fileType = "";
+            bool isSuccess = false;
+            
+            try
+            {
+                Console.WriteLine($"  处理文件: {fileName}");
+                await LogInfoAsync($"正在处理文件: {fileName}", "FileProcessing", "ProcessFile", fileName);
+                
+                if (extension == ".xlsx" || extension == ".xls")
+                {
+                    fileType = "Excel";
+                    var excelFileData = await excelService.ReadExcelFileAsync(filePath);
+                    Console.WriteLine($"    读取到 {excelFileData.Rows.Count} 条数据行");
+                    await databaseService.SaveExcelDataAsync(excelFileData);
+                    Console.WriteLine("    Excel数据已保存到数据库");
+                    await LogInfoAsync("Excel数据已保存到数据库", "Database", "SaveExcelData", fileName);
+                    isSuccess = true;
+                }
+                else if (extension == ".pdf")
+                {
+                    fileType = "PDF";
+                    var pdfFileData = await pdfService.ReadPdfFileAsync(filePath);
+                    Console.WriteLine($"    读取到 {pdfFileData.DiagnosticData.Count} 条诊断数据");
+                    await databaseService.SavePdfDataAsync(pdfFileData);
+                    Console.WriteLine("    PDF数据已保存到数据库");
+                    await LogInfoAsync("PDF数据已保存到数据库", "Database", "SavePdfData", fileName);
+                    isSuccess = true;
+                }
+                else
+                {
+                    Console.WriteLine($"    不支持的文件格式: {extension}");
+                    await LogWarningAsync($"不支持的文件格式: {extension}", "FileProcessing", "ProcessFile", fileName);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"    处理文件失败: {fileName}, 错误: {ex.Message}");
+                await LogErrorAsync($"处理文件失败: {fileName}", ex, "FileProcessing", "ProcessFile", fileName);
+                isSuccess = false;
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(fileType))
+                {
+                    try
+                    {
+                        var targetPath = isSuccess
+                            ? await fileClassificationService.MoveToSuccessAsync(filePath, fileType)
+                            : await fileClassificationService.MoveToFailedAsync(filePath, fileType);
+                        Console.WriteLine($"    文件已移动到{(isSuccess ? "成功" : "失败")}目录: {targetPath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"    移动文件失败: {ex.Message}");
+                        await LogErrorAsync($"移动文件失败: {fileName}", ex, "FileClassification", "MoveFile", fileName);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
         /// 记录信息日志
         /// </summary>
         static async Task LogInfoAsync(string message, string category, string operation, string? fileName = null)
@@ -510,147 +465,5 @@ namespace FtpExcelProcessor
             }
         }
 
-        /// <summary>
-        /// 处理数据：生成SQL并存储
-        /// </summary>
-        static async Task ProcessDataAsync(IConfiguration configuration, ILoggerFactory loggerFactory)
-        {
-            Console.WriteLine("\n=== 开始数据处理（生成SQL）===");
-            await LogInfoAsync("开始数据处理", "DataProcessing", "ProcessData");
-
-            var dataProcessingService = new DataProcessingService(
-                configuration,
-                loggerFactory.CreateLogger<DataProcessingService>(),
-                _databaseLogService);
-
-            var (excelCount, pdfCount) = await dataProcessingService.GetUnprocessedFileCountAsync();
-            if (excelCount > 0 || pdfCount > 0)
-            {
-                Console.WriteLine($"未处理的文件: Excel={excelCount}, PDF={pdfCount}");
-            }
-
-            await dataProcessingService.ProcessUnprocessedDataAsync();
-            Console.WriteLine("=== 数据处理完成（SQL已生成并存储）===");
-            await LogInfoAsync("数据处理完成，SQL已生成并存储", "DataProcessing", "ProcessData");
-        }
-
-        /// <summary>
-        /// 执行存储的SQL
-        /// </summary>
-        static async Task ExecuteStoredSqlAsync(IConfiguration configuration, ILoggerFactory loggerFactory)
-        {
-            Console.WriteLine("\n=== 开始执行存储的SQL ===");
-            await LogInfoAsync("开始执行存储的SQL", "SqlExecution", "ExecuteStoredSql");
-
-            try
-            {
-                var sqlExecutionService = new SqlExecutionService(
-                    configuration,
-                    loggerFactory.CreateLogger<SqlExecutionService>(),
-                    _databaseLogService);
-
-                var connectionString = configuration.GetConnectionString("SQLServer");
-                if (string.IsNullOrWhiteSpace(connectionString))
-                {
-                    Console.WriteLine("数据库连接字符串未配置");
-                    return;
-                }
-
-                using var connection = new SqlConnection(connectionString);
-                await connection.OpenAsync();
-
-                // 获取待执行的SQL配置（支持所有类型的SQL，包括手动插入的）
-                var sql = @"
-                    SELECT Id, ConfigName, SqlStatement, Parameters
-                    FROM SqlExecutionConfig 
-                    WHERE IsActive = 1
-                      AND (LastExecuteTime IS NULL OR ExecuteCount = 0)
-                    ORDER BY ExecutionOrder, Id";
-
-                var sqlConfigs = new List<(int Id, string ConfigName, string SqlStatement, string? Parameters)>();
-
-                using (var command = new SqlCommand(sql, connection))
-                {
-                    using var reader = await command.ExecuteReaderAsync();
-                    while (await reader.ReadAsync())
-                    {
-                        sqlConfigs.Add((
-                            reader.GetInt32(reader.GetOrdinal("Id")),
-                            reader.GetString(reader.GetOrdinal("ConfigName")),
-                            reader.GetString(reader.GetOrdinal("SqlStatement")),
-                            reader.IsDBNull(reader.GetOrdinal("Parameters")) ? null : reader.GetString(reader.GetOrdinal("Parameters"))
-                        ));
-                    }
-                }
-
-                if (sqlConfigs.Count == 0)
-                {
-                    Console.WriteLine("没有待执行的SQL");
-                    return;
-                }
-
-                Console.WriteLine($"找到 {sqlConfigs.Count} 条待执行的SQL\n");
-
-                int successCount = 0;
-                int failCount = 0;
-
-                foreach (var (id, configName, sqlStatement, parametersJson) in sqlConfigs)
-                {
-                    try
-                    {
-                        Console.WriteLine($"处理SQL: {configName}");
-
-                        // 解析参数
-                        Dictionary<string, object?>? parameters = null;
-                        if (!string.IsNullOrWhiteSpace(parametersJson))
-                        {
-                            try
-                            {
-                                parameters = JsonSerializer.Deserialize<Dictionary<string, object?>>(parametersJson);
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"  参数解析失败: {ex.Message}");
-                            }
-                        }
-
-                        // 校验SQL
-                        var (isValid, errorMessage) = await sqlExecutionService.ValidateSqlAsync(sqlStatement, parameters);
-                        if (!isValid)
-                        {
-                            failCount++;
-                            Console.WriteLine($"  校验失败: {errorMessage}\n");
-                            continue;
-                        }
-
-                        // 执行SQL
-                        var (success, message, rowsAffected) = await sqlExecutionService.ExecuteSqlConfigByIdAsync(id, parameters);
-                        if (success)
-                        {
-                            successCount++;
-                            Console.WriteLine($"  执行成功，影响行数: {rowsAffected}\n");
-                        }
-                        else
-                        {
-                            failCount++;
-                            Console.WriteLine($"  执行失败: {message}\n");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        failCount++;
-                        Console.WriteLine($"  处理异常: {ex.Message}\n");
-                    }
-                }
-
-                Console.WriteLine($"=== SQL执行完成: 成功 {successCount} 条, 失败 {failCount} 条 ===");
-                await LogInfoAsync($"SQL执行完成: 成功 {successCount} 条, 失败 {failCount} 条", "SqlExecution", "ExecuteStoredSql");
-            }
-            catch (Exception ex)
-            {
-                await LogErrorAsync("执行存储的SQL时发生错误", ex, "SqlExecution", "ExecuteStoredSql");
-                throw;
-            }
-        }
     }
 }

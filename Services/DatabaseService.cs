@@ -182,12 +182,13 @@ namespace FtpExcelProcessor.Services
 
                     // 1. 保存文件信息（允许同名文件多次导入，每次都插入新记录）
                     var fileInfoSql = @"
-                        INSERT INTO FileInfo (SourceFileName, FileType, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime)
-                        VALUES (@SourceFileName, @FileType, @TestId, @Operator, @TestDate, @Machine, @QC20W, @LastCalibration, @ImportTime);
+                        INSERT INTO FileInfo (SourceFileName, FileType, PartName, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime)
+                        VALUES (@SourceFileName, @FileType, @PartName, @TestId, @Operator, @TestDate, @Machine, @QC20W, @LastCalibration, @ImportTime);
                         SELECT CAST(SCOPE_IDENTITY() AS INT);
                     ";
 
                     var machineValue = fileData.HeaderInfo.GetValueOrDefault("Machine", string.Empty);
+                    var partName = fileData.HeaderInfo.GetValueOrDefault("PartName", string.Empty);
                     
                     // 记录Machine字段的提取和保存情况
                     if (!string.IsNullOrWhiteSpace(machineValue))
@@ -200,10 +201,17 @@ namespace FtpExcelProcessor.Services
                             string.Join(", ", fileData.HeaderInfo.Keys));
                     }
                     
+                    // 记录PartName字段的提取和保存情况（序列号存入PartName）
+                    if (!string.IsNullOrWhiteSpace(partName))
+                    {
+                        _logger.LogInformation("保存PDF文件信息，PartName字段（序列号）: {PartName}", partName);
+                    }
+                    
                     var fileInfoParams = new Dictionary<string, object>
                     {
                         { "@SourceFileName", fileData.SourceFileName },
                         { "@FileType", fileData.FileType },
+                        { "@PartName", partName },
                         { "@TestId", fileData.HeaderInfo.GetValueOrDefault("TestId", string.Empty) },
                         { "@Operator", fileData.HeaderInfo.GetValueOrDefault("Operator", string.Empty) },
                         { "@TestDate", fileData.HeaderInfo.GetValueOrDefault("TestDate", string.Empty) },
@@ -223,14 +231,19 @@ namespace FtpExcelProcessor.Services
                     // 2. 保存诊断数据（跳过 ColumnValue 为空的数据）
                     if (fileData.DiagnosticData != null)
                     {
+                        _logger.LogInformation("准备保存 {Count} 条诊断数据", fileData.DiagnosticData.Count);
                         int rowNum = 1;
                         foreach (var diagnosticItem in fileData.DiagnosticData)
                         {
                             // 跳过 ColumnValue 为空或只包含空白字符的数据
                             if (string.IsNullOrWhiteSpace(diagnosticItem.Value))
                             {
+                                _logger.LogDebug("跳过空值诊断数据: {Key}", diagnosticItem.Key);
                                 continue;
                             }
+                            
+                            _logger.LogDebug("保存诊断数据: RowNumber={RowNumber}, ColumnName={ColumnName}, ColumnValue={ColumnValue}", 
+                                rowNum, diagnosticItem.Key, diagnosticItem.Value);
 
                             // 允许同名文件多次导入，每次都插入新记录
                             var insertSql = @"

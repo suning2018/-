@@ -341,15 +341,28 @@ namespace FtpExcelProcessor.Services
                 }
 
                 rowsAffected = await command.ExecuteNonQueryAsync();
-                isSuccess = true;
-
+                
                 stopwatch.Stop();
-                _logger.LogInformation(
-                    "SQL执行成功: {ConfigName}, 影响行数: {RowsAffected}, 耗时: {Duration}ms",
-                    config.ConfigName, rowsAffected, stopwatch.ElapsedMilliseconds);
+                
+                // 如果受影响行数为0，不标记为执行成功（需要重复执行）
+                if (rowsAffected == 0)
+                {
+                    isSuccess = false;
+                    errorMessage = "受影响行数为0，需要重复执行";
+                    _logger.LogWarning(
+                        "SQL执行完成但受影响行数为0: {ConfigName}, 耗时: {Duration}ms，将标记为需要重复执行",
+                        config.ConfigName, stopwatch.ElapsedMilliseconds);
+                }
+                else
+                {
+                    isSuccess = true;
+                    _logger.LogInformation(
+                        "SQL执行成功: {ConfigName}, 影响行数: {RowsAffected}, 耗时: {Duration}ms",
+                        config.ConfigName, rowsAffected, stopwatch.ElapsedMilliseconds);
+                }
 
-                // 更新配置的执行信息
-                await UpdateSqlConfigExecutionInfoAsync(config.Id, true, rowsAffected, connection, transaction);
+                // 更新配置的执行信息（受影响行数为0时不标记为成功）
+                await UpdateSqlConfigExecutionInfoAsync(config.Id, isSuccess, rowsAffected, connection, transaction);
             }
             catch (Exception ex)
             {
@@ -409,6 +422,49 @@ namespace FtpExcelProcessor.Services
             await command.ExecuteNonQueryAsync();
         }
 
+
+        /// <summary>
+        /// 获取待执行的SQL配置列表
+        /// 包括：从未执行过的、3天内未执行的、受影响行数为0需要重复执行的
+        /// </summary>
+        public async Task<List<(int Id, string ConfigName, string SqlStatement, string? Parameters)>> GetPendingSqlConfigsAsync()
+        {
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            var sql = @"
+                SELECT DISTINCT c.Id, c.ConfigName, c.SqlStatement, c.Parameters
+                FROM SqlExecutionConfig c
+                LEFT JOIN (
+                    SELECT ConfigId, RowsAffected, ExecutionTime,
+                           ROW_NUMBER() OVER (PARTITION BY ConfigId ORDER BY ExecutionTime DESC) as rn
+                    FROM SqlExecutionLog
+                    WHERE IsSuccess = 1
+                ) log ON c.Id = log.ConfigId AND log.rn = 1
+                WHERE c.IsActive = 1
+                  AND (
+                      c.LastExecuteTime IS NULL 
+                      OR c.LastExecuteTime < DATEADD(day, -3, GETDATE())
+                      OR (log.RowsAffected = 0 AND log.ExecutionTime >= DATEADD(day, -3, GETDATE()))
+                  )
+                ORDER BY c.ExecutionOrder, c.Id";
+
+            var sqlConfigs = new List<(int Id, string ConfigName, string SqlStatement, string? Parameters)>();
+
+            using var command = new SqlCommand(sql, connection);
+            using var reader = await command.ExecuteReaderAsync();
+            while (await reader.ReadAsync())
+            {
+                sqlConfigs.Add((
+                    reader.GetInt32(reader.GetOrdinal("Id")),
+                    reader.GetString(reader.GetOrdinal("ConfigName")),
+                    reader.GetString(reader.GetOrdinal("SqlStatement")),
+                    reader.IsDBNull(reader.GetOrdinal("Parameters")) ? null : reader.GetString(reader.GetOrdinal("Parameters"))
+                ));
+            }
+
+            return sqlConfigs;
+        }
 
         /// <summary>
         /// 根据ID获取SQL配置
@@ -512,7 +568,23 @@ namespace FtpExcelProcessor.Services
                 using var command = new SqlCommand(sql, connection, transaction);
                 command.Parameters.AddWithValue("@Id", configId);
                 command.Parameters.AddWithValue("@LastExecuteTime", DateTime.Now);
-                command.Parameters.AddWithValue("@LastExecuteResult", isSuccess ? $"成功，影响行数: {rowsAffected}" : "失败");
+                
+                // 受影响行数为0时，标记为需要重复执行，不标记为成功
+                string resultMessage;
+                if (rowsAffected == 0)
+                {
+                    resultMessage = "受影响行数为0，需要重复执行";
+                }
+                else if (isSuccess)
+                {
+                    resultMessage = $"成功，影响行数: {rowsAffected}";
+                }
+                else
+                {
+                    resultMessage = "失败";
+                }
+                
+                command.Parameters.AddWithValue("@LastExecuteResult", resultMessage);
                 command.Parameters.AddWithValue("@UpdateTime", DateTime.Now);
 
                 await command.ExecuteNonQueryAsync();

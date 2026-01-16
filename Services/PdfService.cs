@@ -57,8 +57,8 @@ namespace FtpExcelProcessor.Services
                     // 合并所有文本
                     var fullText = string.Join("\n", allText);
 
-                    // 提取表头信息
-                    fileData.HeaderInfo = ExtractHeaderInfo(fullText);
+                    // 提取表头信息（传入文件名以便从文件名提取序列号）
+                    fileData.HeaderInfo = ExtractHeaderInfo(fullText, fileData.SourceFileName);
 
                     // 提取诊断数据（传入HeaderInfo以获取XY/YZ/ZX标识）
                     fileData.DiagnosticData = ExtractDiagnosticData(fullText, fileData.HeaderInfo);
@@ -78,7 +78,9 @@ namespace FtpExcelProcessor.Services
         /// <summary>
         /// 提取表头信息
         /// </summary>
-        private Dictionary<string, string> ExtractHeaderInfo(string text)
+        /// <param name="text">PDF文本内容</param>
+        /// <param name="sourceFileName">源文件名（用于从文件名提取序列号）</param>
+        private Dictionary<string, string> ExtractHeaderInfo(string text, string sourceFileName = "")
         {
             var headerInfo = new Dictionary<string, string>();
 
@@ -106,9 +108,10 @@ namespace FtpExcelProcessor.Services
             // 提取机器名称（常用格式）
             var machinePatterns = new[]
             {
-                @"机器[：:]\s*([^\n\r,，]+)",
-                @"Machine[：:]\s*([^\n\r,，]+)",
-                @"设备[：:]\s*([^\n\r,，]+)"
+                @"机器名称\s*([^\s\n\r,，]+)",              // 机器名称T-V856S
+                @"机器[：:]\s*([^\n\r,，]+)",              // 机器: XXX
+                @"Machine[：:]\s*([^\n\r,，]+)",           // Machine: XXX
+                @"设备[：:]\s*([^\n\r,，]+)"               // 设备: XXX
             };
             
             foreach (var pattern in machinePatterns)
@@ -154,6 +157,24 @@ namespace FtpExcelProcessor.Services
                 headerInfo["LastCalibration"] = calMatch.Groups[1].Value;
             }
 
+            // 提取序列号（格式：序列号172600163），存入PartName字段
+            var serialMatch = Regex.Match(text, @"序列号\s*(\d+)");
+            if (serialMatch.Success)
+            {
+                headerInfo["PartName"] = serialMatch.Groups[1].Value;
+                _logger.LogInformation("从PDF文本中提取序列号并存入PartName: {PartName}", headerInfo["PartName"]);
+            }
+            else if (!string.IsNullOrEmpty(sourceFileName))
+            {
+                // 如果PDF文本中没有序列号，尝试从文件名中提取（格式：YZ_172600163.pdf）
+                var fileNameMatch = Regex.Match(sourceFileName, @"_(\d+)\.pdf", RegexOptions.IgnoreCase);
+                if (fileNameMatch.Success)
+                {
+                    headerInfo["PartName"] = fileNameMatch.Groups[1].Value;
+                    _logger.LogInformation("从文件名中提取序列号并存入PartName: {PartName}", headerInfo["PartName"]);
+                }
+            }
+
             return headerInfo;
         }
 
@@ -190,75 +211,115 @@ namespace FtpExcelProcessor.Services
             string keySuffix = string.IsNullOrEmpty(axisIdentifier) ? string.Empty : $"_{axisIdentifier}";
 
             // 提取反向间隙X（格式：22%反向间隙 X-1.5µm-0.9µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var reversalXMatch = Regex.Match(text, @"(\d+)%\s*反向间隙\s*X\s*([-\d.]+)\s*µm\s*([-\d.]+)\s*µm");
             if (!reversalXMatch.Success)
             {
-                reversalXMatch = Regex.Match(text, @"(\d+)%反向间隙\s*X[^\d]*([-\d.]+)µm[^\d-]*([-\d.]+)µm");
+                // 改进：先匹配可能包含负号的模式，确保负号被捕获
+                reversalXMatch = Regex.Match(text, @"(\d+)%反向间隙\s*X[^\d\-]*(-?\d+\.?\d*)\s*µm[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (reversalXMatch.Success)
             {
                 diagnosticData[$"反向间隙X{keySuffix}_百分比"] = reversalXMatch.Groups[1].Value + "%";
                 diagnosticData[$"反向间隙X{keySuffix}_值1"] = reversalXMatch.Groups[2].Value + "µm";
-                diagnosticData[$"反向间隙X{keySuffix}_值2"] = reversalXMatch.Groups[3].Value + "µm";
+                if (reversalXMatch.Groups.Count > 3 && !string.IsNullOrEmpty(reversalXMatch.Groups[3].Value))
+                {
+                    diagnosticData[$"反向间隙X{keySuffix}_值2"] = reversalXMatch.Groups[3].Value + "µm";
+                }
             }
 
             // 提取横向间隙Z（格式：19%横向间隙 Z1.4µm1.2µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var lateralZMatch = Regex.Match(text, @"(\d+)%\s*横向间隙\s*Z\s*([-\d.]+)\s*µm\s*([-\d.]+)\s*µm");
             if (!lateralZMatch.Success)
             {
-                lateralZMatch = Regex.Match(text, @"(\d+)%横向间隙\s*Z[^\d]*([-\d.]+)µm[^\d-]*([-\d.]+)µm");
+                // 改进：确保负号被捕获
+                lateralZMatch = Regex.Match(text, @"(\d+)%横向间隙\s*Z[^\d\-]*(-?\d+\.?\d*)\s*µm[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (lateralZMatch.Success)
             {
                 diagnosticData[$"横向间隙Z{keySuffix}_百分比"] = lateralZMatch.Groups[1].Value + "%";
                 diagnosticData[$"横向间隙Z{keySuffix}_值1"] = lateralZMatch.Groups[2].Value + "µm";
-                diagnosticData[$"横向间隙Z{keySuffix}_值2"] = lateralZMatch.Groups[3].Value + "µm";
+                if (lateralZMatch.Groups.Count > 3 && !string.IsNullOrEmpty(lateralZMatch.Groups[3].Value))
+                {
+                    diagnosticData[$"横向间隙Z{keySuffix}_值2"] = lateralZMatch.Groups[3].Value + "µm";
+                }
             }
 
             // 提取反向跃冲X（格式：10%反向跃冲X-0.2µm0.7µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var spikeXMatch = Regex.Match(text, @"(\d+)%\s*反向跃冲\s*X\s*([-\d.]+)\s*µm\s*([-\d.]+)\s*µm");
             if (!spikeXMatch.Success)
             {
-                spikeXMatch = Regex.Match(text, @"(\d+)%反向跃冲X[^\d]*([-\d.]+)µm[^\d-]*([-\d.]+)µm");
+                // 改进：确保负号被捕获
+                spikeXMatch = Regex.Match(text, @"(\d+)%反向跃冲X[^\d\-]*(-?\d+\.?\d*)\s*µm[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (spikeXMatch.Success)
             {
                 diagnosticData[$"反向跃冲X{keySuffix}_百分比"] = spikeXMatch.Groups[1].Value + "%";
                 diagnosticData[$"反向跃冲X{keySuffix}_值1"] = spikeXMatch.Groups[2].Value + "µm";
-                diagnosticData[$"反向跃冲X{keySuffix}_值2"] = spikeXMatch.Groups[3].Value + "µm";
+                if (spikeXMatch.Groups.Count > 3 && !string.IsNullOrEmpty(spikeXMatch.Groups[3].Value))
+                {
+                    diagnosticData[$"反向跃冲X{keySuffix}_值2"] = spikeXMatch.Groups[3].Value + "µm";
+                }
             }
 
             // 提取反向跃冲Y（格式：18%反向跃冲Y1.2µm-1.8µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var spikeYMatch = Regex.Match(text, @"(\d+)%\s*反向跃冲\s*Y\s*([-\d.]+)\s*µm\s*([-\d.]+)\s*µm");
             if (!spikeYMatch.Success)
             {
-                spikeYMatch = Regex.Match(text, @"(\d+)%反向跃冲Y[^\d]*([-\d.]+)µm[^\d-]*([-\d.]+)µm");
+                // 改进：确保负号被捕获
+                spikeYMatch = Regex.Match(text, @"(\d+)%反向跃冲Y[^\d\-]*(-?\d+\.?\d*)\s*µm[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (spikeYMatch.Success)
             {
                 diagnosticData[$"反向跃冲Y{keySuffix}_百分比"] = spikeYMatch.Groups[1].Value + "%";
                 diagnosticData[$"反向跃冲Y{keySuffix}_值1"] = spikeYMatch.Groups[2].Value + "µm";
-                diagnosticData[$"反向跃冲Y{keySuffix}_值2"] = spikeYMatch.Groups[3].Value + "µm";
+                if (spikeYMatch.Groups.Count > 3 && !string.IsNullOrEmpty(spikeYMatch.Groups[3].Value))
+                {
+                    diagnosticData[$"反向跃冲Y{keySuffix}_值2"] = spikeYMatch.Groups[3].Value + "µm";
+                }
             }
 
             // 提取反向间隙Y（格式：16%反向间隙 Y-0.8µm-1.6µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var reversalYMatch = Regex.Match(text, @"(\d+)%\s*反向间隙\s*Y\s*([-\d.]+)\s*µm\s*([-\d.]+)\s*µm");
             if (!reversalYMatch.Success)
             {
-                reversalYMatch = Regex.Match(text, @"(\d+)%反向间隙\s*Y[^\d]*([-\d.]+)µm[^\d-]*([-\d.]+)µm");
+                // 改进：先匹配可能包含负号的模式，确保负号被捕获
+                // 匹配：16%反向间隙 Y 后面可能有特殊字符，然后是负号（可选）+数字
+                reversalYMatch = Regex.Match(text, @"(\d+)%反向间隙\s*Y[^\d\-]*(-?\d+\.?\d*)\s*µm[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
-            if (reversalYMatch.Success)
+            if (!reversalYMatch.Success)
+            {
+                // 备用模式：处理只有单个值的情况（如：16% 反向间隙 Y -0.8µm）
+                reversalYMatch = Regex.Match(text, @"(\d+)%\s*反向间隙\s*Y[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
+                if (reversalYMatch.Success)
+                {
+                    diagnosticData[$"反向间隙Y{keySuffix}_百分比"] = reversalYMatch.Groups[1].Value + "%";
+                    diagnosticData[$"反向间隙Y{keySuffix}_值1"] = reversalYMatch.Groups[2].Value + "µm";
+                }
+            }
+            if (reversalYMatch.Success && reversalYMatch.Groups.Count > 3 && !string.IsNullOrEmpty(reversalYMatch.Groups[3].Value))
             {
                 diagnosticData[$"反向间隙Y{keySuffix}_百分比"] = reversalYMatch.Groups[1].Value + "%";
                 diagnosticData[$"反向间隙Y{keySuffix}_值1"] = reversalYMatch.Groups[2].Value + "µm";
                 diagnosticData[$"反向间隙Y{keySuffix}_值2"] = reversalYMatch.Groups[3].Value + "µm";
             }
+            else if (reversalYMatch.Success)
+            {
+                diagnosticData[$"反向间隙Y{keySuffix}_百分比"] = reversalYMatch.Groups[1].Value + "%";
+                diagnosticData[$"反向间隙Y{keySuffix}_值1"] = reversalYMatch.Groups[2].Value + "µm";
+            }
 
             // 提取垂直度（格式：15%垂直度-9.7µm/m，支持无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var verticalityMatch = Regex.Match(text, @"(\d+)%\s*垂直度\s*([-\d.]+)\s*µm/m");
             if (!verticalityMatch.Success)
             {
-                verticalityMatch = Regex.Match(text, @"(\d+)%垂直度([-\d.]+)µm/m");
+                // 改进：确保负号被捕获
+                verticalityMatch = Regex.Match(text, @"(\d+)%垂直度[^\d\-]*(-?\d+\.?\d*)\s*µm/m", RegexOptions.Singleline);
             }
             if (verticalityMatch.Success)
             {
@@ -267,10 +328,12 @@ namespace FtpExcelProcessor.Services
             }
 
             // 提取反向跃冲Z（格式：13%反向跃冲Z1.3µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var spikeZMatch = Regex.Match(text, @"(\d+)%\s*反向跃冲\s*Z\s*([-\d.]+)\s*µm");
             if (!spikeZMatch.Success)
             {
-                spikeZMatch = Regex.Match(text, @"(\d+)%反向跃冲Z[^\d]*([-\d.]+)µm");
+                // 改进：确保负号被捕获
+                spikeZMatch = Regex.Match(text, @"(\d+)%反向跃冲Z[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (spikeZMatch.Success)
             {
@@ -279,10 +342,12 @@ namespace FtpExcelProcessor.Services
             }
 
             // 提取反向间隙Z（格式：12%反向间隙 Z1.2µm或17%反向间隙 Z1.2µm，支持特殊符号和无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var reversalZMatch = Regex.Match(text, @"(\d+)%\s*反向间隙\s*Z\s*([-\d.]+)\s*µm");
             if (!reversalZMatch.Success)
             {
-                reversalZMatch = Regex.Match(text, @"(\d+)%反向间隙\s*Z[^\d]*([-\d.]+)µm");
+                // 改进：确保负号被捕获
+                reversalZMatch = Regex.Match(text, @"(\d+)%反向间隙\s*Z[^\d\-]*(-?\d+\.?\d*)\s*µm", RegexOptions.Singleline);
             }
             if (reversalZMatch.Success)
             {
@@ -291,10 +356,12 @@ namespace FtpExcelProcessor.Services
             }
 
             // 提取伺服不匹配（格式：9%伺服不匹配-0.01ms，支持无空格）
+            // 注意：需要确保捕获负号，即使负号和数字之间有特殊字符
             var servoMatch = Regex.Match(text, @"(\d+)%\s*伺服不匹配\s*([-\d.]+)\s*ms");
             if (!servoMatch.Success)
             {
-                servoMatch = Regex.Match(text, @"(\d+)%伺服不匹配([-\d.]+)ms");
+                // 改进：确保负号被捕获
+                servoMatch = Regex.Match(text, @"(\d+)%伺服不匹配[^\d\-]*(-?\d+\.?\d*)\s*ms", RegexOptions.Singleline);
             }
             if (servoMatch.Success)
             {
@@ -321,6 +388,52 @@ namespace FtpExcelProcessor.Services
                 diagnosticData["运行2"] = runMatch.Groups[2].Value;
                 diagnosticData["拟合1"] = runMatch.Groups[3].Value;
                 diagnosticData["拟合2"] = runMatch.Groups[4].Value;
+            }
+
+            // 提取误差补偿的轴标识（Z），用于添加到反向间隙误差的键名中
+            string compensationAxis = string.Empty;
+            var compensationMatch = Regex.Match(text, @"误差补偿\s*[-－]\s*([XYZ])");
+            if (compensationMatch.Success)
+            {
+                compensationAxis = compensationMatch.Groups[1].Value;
+            }
+
+            // 提取反向间隙误差（格式：反向间隙误差: -1 μm）
+            // 直接查找"反向间隙误差"到"μm"之间的数字
+            string? errorValue = null;
+            var errorTextIndex = text.IndexOf("反向间隙误差", StringComparison.OrdinalIgnoreCase);
+            if (errorTextIndex >= 0)
+            {
+                var preview = text.Substring(errorTextIndex, Math.Min(100, text.Length - errorTextIndex));
+                var umIndex = preview.IndexOf("μm", StringComparison.OrdinalIgnoreCase);
+                if (umIndex > 0)
+                {
+                    var beforeUm = preview.Substring(0, umIndex);
+                    var numberMatch = Regex.Match(beforeUm, @"([-\d.]+)");
+                    if (numberMatch.Success)
+                    {
+                        errorValue = numberMatch.Groups[1].Value + " μm";
+                    }
+                }
+            }
+            
+            // 如果直接查找失败，尝试正则表达式匹配
+            if (string.IsNullOrEmpty(errorValue))
+            {
+                var reversalErrorMatch = Regex.Match(text, @"反向间隙误差[：:\s]+([-\d.]+)\s*μm", RegexOptions.IgnoreCase);
+                if (reversalErrorMatch.Success)
+                {
+                    errorValue = reversalErrorMatch.Groups[1].Value + " μm";
+                }
+            }
+            
+            if (!string.IsNullOrEmpty(errorValue))
+            {
+                // 将误差补偿的轴标识添加到键名中：反向间隙误差Z
+                var errorKey = string.IsNullOrEmpty(compensationAxis) 
+                    ? $"反向间隙误差{keySuffix}" 
+                    : $"反向间隙误差{compensationAxis}";
+                diagnosticData[errorKey] = errorValue;
             }
 
             return diagnosticData;
