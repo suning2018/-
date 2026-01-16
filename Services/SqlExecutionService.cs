@@ -433,7 +433,7 @@ namespace FtpExcelProcessor.Services
             await connection.OpenAsync();
 
             var sql = @"
-                SELECT DISTINCT c.Id, c.ConfigName, c.SqlStatement, c.Parameters
+                SELECT c.Id, c.ConfigName, c.SqlStatement, c.Parameters
                 FROM SqlExecutionConfig c
                 LEFT JOIN (
                     SELECT ConfigId, RowsAffected, ExecutionTime,
