@@ -38,7 +38,7 @@ namespace FtpExcelProcessor.Services
             {
                 SourceFileName = Path.GetFileName(filePath),
                 ImportTime = DateTime.Now,
-                FileType = "RenishawBallbar"
+                FileType = "PDF"
             };
 
             try
