@@ -74,9 +74,15 @@ namespace FtpExcelProcessor.Services
                 {
                     foreach (var config in customConfigs)
                     {
+                        if (string.IsNullOrWhiteSpace(config.CustomSqlTemplate))
+                        {
+                            continue;
+                        }
+                        
                         await ProcessCustomSqlTemplateAsync(
                             config,
                             fileInfoId,
+                            fileType,
                             fileDataRows,
                             connection,
                             transaction);
@@ -240,17 +246,31 @@ namespace FtpExcelProcessor.Services
                     continue;
                 }
 
+                // 构建WHERE子句（检查存在性和构建UPDATE SQL共用）
+                var whereClause = $"{targetMatchField} = @MatchValue";
+                if (!string.IsNullOrWhiteSpace(firstConfig.MatchCondition))
+                {
+                    whereClause += $" AND {firstConfig.MatchCondition}";
+                }
+
+                // 检查目标表中是否存在匹配的记录，避免生成无效SQL
+                var checkExistsSql = $"SELECT COUNT(*) FROM {targetTable} WHERE {whereClause}";
+                using var checkCommand = new SqlCommand(checkExistsSql, connection, transaction);
+                checkCommand.Parameters.AddWithValue("@MatchValue", matchValue);
+                
+                var existsCount = Convert.ToInt32(await checkCommand.ExecuteScalarAsync() ?? 0);
+                if (existsCount == 0)
+                {
+                    _logger.LogDebug("目标表 {TargetTable} 中不存在匹配记录（{MatchField}={MatchValue}），跳过生成SQL", 
+                        targetTable, targetMatchField, matchValue);
+                    continue;
+                }
+
                 // 构建UPDATE SQL
                 var updateSql = $@"
                     UPDATE {targetTable}
                     SET {string.Join(", ", updateFields)}, UpdateTime = @UpdateTime
-                    WHERE {targetMatchField} = @MatchValue";
-
-                // 添加匹配条件
-                if (!string.IsNullOrWhiteSpace(firstConfig.MatchCondition))
-                {
-                    updateSql += $" AND {firstConfig.MatchCondition}";
-                }
+                    WHERE {whereClause}";
 
                 // 合并参数
                 var allParameters = new Dictionary<string, object?>
@@ -309,7 +329,7 @@ namespace FtpExcelProcessor.Services
         }
 
         /// <summary>
-        /// 保存映射SQL到配置表（为每行数据生成独立的SQL记录）
+        /// 保存映射SQL到配置表
         /// </summary>
         private async Task SaveMappingSqlToConfigAsync(
             List<DataMappingConfigModel> configs,
@@ -322,7 +342,7 @@ namespace FtpExcelProcessor.Services
         {
             var configName = $"Mapping_{targetTable}_{configs[0].TargetMatchField}_{matchValue}_{DateTime.Now:yyyyMMddHHmmss}";
             var parametersJson = System.Text.Json.JsonSerializer.Serialize(parameters);
-            var description = $"自动生成的映射SQL: {string.Join(", ", configs.Select(c => c.Description))}, 匹配值={matchValue}";
+            var description = $"自动生成的映射SQL: {string.Join(", ", configs.Select(c => c.Description ?? c.ConfigName))}, 匹配值={matchValue}";
             
             await SaveSqlToConfigAsync(configName, sql, parametersJson, description, connection, transaction);
         }
@@ -333,6 +353,7 @@ namespace FtpExcelProcessor.Services
         private async Task ProcessCustomSqlTemplateAsync(
             DataMappingConfigModel config,
             int fileInfoId,
+            string fileType,
             List<FileDataRowModel> fileDataRows,
             SqlConnection connection,
             SqlTransaction transaction)
@@ -356,28 +377,25 @@ namespace FtpExcelProcessor.Services
                 // 替换SQL模板中的占位符
                 var sql = ReplacePlaceholders(config.CustomSqlTemplate, fileInfoId, fileInfo);
 
-                // 如果模板中包含 {ColumnName} 或 {RowNumber}，需要为每个匹配的数据行生成SQL
-                if (config.CustomSqlTemplate.Contains("{ColumnName}") || config.CustomSqlTemplate.Contains("{RowNumber}"))
-                {
-                    var templateParams = ParseTemplateParameters(config.TemplateParameters);
-                    var matchingRows = GetMatchingRows(fileDataRows, templateParams);
+                // 根据SourceDataField和MatchCondition进行过滤（必须至少配置一个）
+                bool hasFilterCondition = !string.IsNullOrWhiteSpace(config.SourceDataField) || 
+                    (fileType.Equals("Excel", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(config.MatchCondition));
 
-                    if (matchingRows.Count == 0)
-                    {
-                        _logger.LogDebug("配置 {ConfigName} 没有找到匹配的数据行", config.ConfigName);
-                        return;
-                    }
-
-                    foreach (var row in matchingRows)
-                    {
-                        var rowSql = ReplaceRowPlaceholders(sql, row);
-                        await SaveCustomSqlToConfigAsync(config, rowSql, fileInfoId, row, connection, transaction);
-                    }
-                }
-                else
+                if (!hasFilterCondition)
                 {
-                    await SaveCustomSqlToConfigAsync(config, sql, fileInfoId, null, connection, transaction);
+                    _logger.LogDebug("配置 {ConfigName} 未配置SourceDataField和MatchCondition，跳过处理", config.ConfigName);
+                    return;
                 }
+
+                var matchingRows = GetMatchingRowsForCustomTemplate(fileDataRows, config, fileType);
+                if (matchingRows.Count == 0)
+                {
+                    _logger.LogDebug("配置 {ConfigName} 没有找到匹配的数据行，跳过", config.ConfigName);
+                    return;
+                }
+
+                // 直接保存SQL
+                await SaveCustomSqlToConfigAsync(config, sql, fileInfoId, connection, transaction);
             }
             catch (Exception ex)
             {
@@ -429,58 +447,33 @@ namespace FtpExcelProcessor.Services
         }
 
         /// <summary>
-        /// 解析模板参数（JSON格式）
+        /// 获取匹配的数据行（用于自定义SQL模板）
+        /// SourceDataField作为ColumnName，MatchCondition作为RowNumber（Excel文件）
+        /// 必须满足所有配置的条件才匹配
         /// </summary>
-        private Dictionary<string, string>? ParseTemplateParameters(string? templateParameters)
+        private List<FileDataRowModel> GetMatchingRowsForCustomTemplate(
+            List<FileDataRowModel> fileDataRows, 
+            DataMappingConfigModel config,
+            string fileType)
         {
-            if (string.IsNullOrWhiteSpace(templateParameters))
+            var matchingRows = fileDataRows.AsEnumerable();
+
+            // 如果配置了SourceDataField，必须匹配该列名
+            if (!string.IsNullOrWhiteSpace(config.SourceDataField))
             {
-                return null;
+                matchingRows = matchingRows.Where(r => 
+                    r.ColumnName.Equals(config.SourceDataField, StringComparison.OrdinalIgnoreCase));
             }
 
-            try
+            // 如果配置了MatchCondition（Excel文件），必须匹配该行号
+            if (fileType.Equals("Excel", StringComparison.OrdinalIgnoreCase) && 
+                !string.IsNullOrWhiteSpace(config.MatchCondition) &&
+                int.TryParse(config.MatchCondition, out var rowNum))
             {
-                return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(templateParameters);
-            }
-            catch
-            {
-                _logger.LogWarning("解析模板参数失败: {TemplateParameters}", templateParameters);
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// 获取匹配的数据行
-        /// </summary>
-        private List<FileDataRowModel> GetMatchingRows(List<FileDataRowModel> fileDataRows, Dictionary<string, string>? templateParams)
-        {
-            string? requiredColumnName = null;
-            int? requiredRowNumber = null;
-
-            if (templateParams != null)
-            {
-                templateParams.TryGetValue("ColumnName", out requiredColumnName);
-                if (templateParams.TryGetValue("RowNumber", out var rowNumStr) && int.TryParse(rowNumStr, out var rowNum))
-                {
-                    requiredRowNumber = rowNum;
-                }
+                matchingRows = matchingRows.Where(r => r.RowNumber == rowNum);
             }
 
-            return fileDataRows.Where(r =>
-                (requiredColumnName == null || r.ColumnName == requiredColumnName) &&
-                (requiredRowNumber == null || r.RowNumber == requiredRowNumber)
-            ).ToList();
-        }
-
-        /// <summary>
-        /// 替换行相关的占位符
-        /// </summary>
-        private string ReplaceRowPlaceholders(string sql, FileDataRowModel row)
-        {
-            return sql
-                .Replace("{ColumnName}", row.ColumnName ?? "")
-                .Replace("{RowNumber}", row.RowNumber.ToString())
-                .Replace("{ColumnValue}", row.ColumnValue ?? "");
+            return matchingRows.ToList();
         }
 
         /// <summary>
@@ -490,22 +483,11 @@ namespace FtpExcelProcessor.Services
             DataMappingConfigModel config,
             string sql,
             int fileInfoId,
-            FileDataRowModel? row,
             SqlConnection connection,
             SqlTransaction transaction)
         {
-            var configName = $"CustomTemplate_{config.ConfigName}_{fileInfoId}";
-            if (row != null)
-            {
-                configName += $"_{row.RowNumber}_{row.ColumnName}";
-            }
-            configName += $"_{DateTime.Now:yyyyMMddHHmmss}";
-
+            var configName = $"CustomTemplate_{config.ConfigName}_{fileInfoId}_{DateTime.Now:yyyyMMddHHmmss}";
             var description = config.Description ?? $"自定义SQL模板: {config.ConfigName}";
-            if (row != null)
-            {
-                description += $", RowNumber={row.RowNumber}, ColumnName={row.ColumnName}";
-            }
 
             await SaveSqlToConfigAsync(configName, sql, "{}", description, connection, transaction);
         }
