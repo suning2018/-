@@ -390,6 +390,144 @@ namespace FtpExcelProcessor.Services
                 diagnosticData["拟合2"] = runMatch.Groups[4].Value;
             }
 
+            // 提取最大分散度(Ps max)（格式：最大分散度 (Ps max)2.0 或 最大分散度(Psmax) 10.2µm，支持多种格式）
+            string? psmaxValue = null;
+            // 格式1: 最大分散度 (Ps max)2.0（数字直接跟在括号后面，可能没有µm单位）
+            var psmaxMatch = Regex.Match(text, @"最大分散度\s*\(Ps\s+max\)\s*([\d.]+)", RegexOptions.IgnoreCase);
+            if (psmaxMatch.Success)
+            {
+                psmaxValue = psmaxMatch.Groups[1].Value;
+            }
+            else
+            {
+                // 格式2: 最大分散度(Psmax) 10.2µm
+                psmaxMatch = Regex.Match(text, @"最大分散度\s*\(Psmax\)\s*([\d.]+)\s*µm", RegexOptions.IgnoreCase);
+                if (psmaxMatch.Success)
+                {
+                    psmaxValue = psmaxMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(psmaxValue))
+            {
+                // 格式3: 最大分散度(Psmax)10.2µm（无空格）
+                psmaxMatch = Regex.Match(text, @"最大分散度\s*\(Psmax\)([\d.]+)µm", RegexOptions.IgnoreCase);
+                if (psmaxMatch.Success)
+                {
+                    psmaxValue = psmaxMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(psmaxValue))
+            {
+                // 格式4: Psmax 10.2µm
+                psmaxMatch = Regex.Match(text, @"Psmax\s*([\d.]+)\s*µm", RegexOptions.IgnoreCase);
+                if (psmaxMatch.Success)
+                {
+                    psmaxValue = psmaxMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(psmaxValue))
+            {
+                // 格式5: Psmax10.2µm（无空格）
+                psmaxMatch = Regex.Match(text, @"Psmax([\d.]+)µm", RegexOptions.IgnoreCase);
+                if (psmaxMatch.Success)
+                {
+                    psmaxValue = psmaxMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (!string.IsNullOrEmpty(psmaxValue))
+            {
+                diagnosticData[$"最大分散度(Psmax){keySuffix}"] = psmaxValue;
+                _logger.LogInformation("成功提取最大分散度(Psmax): {Value}", psmaxValue);
+            }
+            else
+            {
+                _logger.LogWarning("未能从PDF文本中提取到最大分散度(Psmax)");
+            }
+
+            // 提取位置不确定度(P)（格式：位置不确定度 (P)3.9 或 位置不确定度(P) 5.3µm，支持多种格式）
+            string? positionUncertaintyValue = null;
+            // 格式1: 位置不确定度 (P)3.9（数字直接跟在括号后面，可能没有µm单位）
+            var positionUncertaintyMatch = Regex.Match(text, @"位置不确定度\s*\(P\)\s*([\d.]+)(?:\s*µm)?", RegexOptions.IgnoreCase);
+            if (positionUncertaintyMatch.Success)
+            {
+                var value = positionUncertaintyMatch.Groups[1].Value;
+                // 检查后面是否有µm，如果有则添加，否则不加
+                var afterMatch = text.Substring(positionUncertaintyMatch.Index + positionUncertaintyMatch.Length);
+                if (afterMatch.TrimStart().StartsWith("µm", StringComparison.OrdinalIgnoreCase))
+                {
+                    positionUncertaintyValue = value + "µm";
+                }
+                else
+                {
+                    positionUncertaintyValue = value;
+                }
+            }
+            if (string.IsNullOrEmpty(positionUncertaintyValue))
+            {
+                // 格式2: 位置不确定度(P)5.3µm（无空格）
+                positionUncertaintyMatch = Regex.Match(text, @"位置不确定度\s*\(P\)([\d.]+)µm", RegexOptions.IgnoreCase);
+                if (positionUncertaintyMatch.Success)
+                {
+                    positionUncertaintyValue = positionUncertaintyMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(positionUncertaintyValue))
+            {
+                // 格式3: 位置不确定度(P) 5.3µm（有空格）
+                positionUncertaintyMatch = Regex.Match(text, @"位置不确定度\s*\(P\)\s*([\d.]+)\s*µm", RegexOptions.IgnoreCase);
+                if (positionUncertaintyMatch.Success)
+                {
+                    positionUncertaintyValue = positionUncertaintyMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(positionUncertaintyValue))
+            {
+                // 格式4: 位置不确定度后面跟数字和µm的模式（可能没有括号）
+                positionUncertaintyMatch = Regex.Match(text, @"位置不确定度[^\d]*([\d.]+)\s*µm", RegexOptions.IgnoreCase);
+                if (positionUncertaintyMatch.Success)
+                {
+                    positionUncertaintyValue = positionUncertaintyMatch.Groups[1].Value + "µm";
+                }
+            }
+            if (string.IsNullOrEmpty(positionUncertaintyValue))
+            {
+                // 最后尝试：直接查找"位置不确定度"到数字之间的内容
+                var positionIndex = text.IndexOf("位置不确定度", StringComparison.OrdinalIgnoreCase);
+                if (positionIndex >= 0)
+                {
+                    var preview = text.Substring(positionIndex, Math.Min(100, text.Length - positionIndex));
+                    // 先尝试找括号后的数字
+                    var parenMatch = Regex.Match(preview, @"\(P\)\s*([\d.]+)", RegexOptions.IgnoreCase);
+                    if (parenMatch.Success)
+                    {
+                        positionUncertaintyValue = parenMatch.Groups[1].Value;
+                    }
+                    else
+                    {
+                        // 再尝试找µm前的数字
+                        var umIndex = preview.IndexOf("µm", StringComparison.OrdinalIgnoreCase);
+                        if (umIndex > 0)
+                        {
+                            var beforeUm = preview.Substring(0, umIndex);
+                            var numberMatch = Regex.Match(beforeUm, @"([\d.]+)");
+                            if (numberMatch.Success)
+                            {
+                                positionUncertaintyValue = numberMatch.Groups[1].Value + "µm";
+                            }
+                        }
+                    }
+                }
+            }
+            if (!string.IsNullOrEmpty(positionUncertaintyValue))
+            {
+                diagnosticData[$"位置不确定度(P){keySuffix}"] = positionUncertaintyValue;
+                _logger.LogInformation("成功提取位置不确定度(P): {Value}", positionUncertaintyValue);
+            }
+            else
+            {
+                _logger.LogWarning("未能从PDF文本中提取到位置不确定度(P)");
+            }
+
             // 提取误差补偿的轴标识（Z），用于添加到反向间隙误差的键名中
             string compensationAxis = string.Empty;
             var compensationMatch = Regex.Match(text, @"误差补偿\s*[-－]\s*([XYZ])");

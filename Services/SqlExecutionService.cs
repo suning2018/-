@@ -443,8 +443,11 @@ namespace FtpExcelProcessor.Services
                 ) log ON c.Id = log.ConfigId AND log.rn = 1
                 WHERE c.IsActive = 1
                   AND (
-                      c.LastExecuteTime IS NULL 
-                      OR c.LastExecuteTime < DATEADD(day, -3, GETDATE())
+                      -- 从未执行过（没有成功执行的记录）
+                      log.ConfigId IS NULL
+                      -- 或者最后一次成功执行超过3天
+                      OR (log.ExecutionTime < DATEADD(day, -3, GETDATE()))
+                      -- 或者最后一次成功执行受影响行数为0（需要重复执行）
                       OR (log.RowsAffected = 0 AND log.ExecutionTime >= DATEADD(day, -3, GETDATE()))
                   )
                 ORDER BY c.ExecutionOrder, c.Id";
