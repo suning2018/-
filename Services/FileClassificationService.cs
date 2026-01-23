@@ -133,6 +133,7 @@ namespace FtpExcelProcessor.Services
             {
                 "excel" => isSuccess ? _excelSuccessPath : _excelFailedPath,
                 "pdf" => isSuccess ? _pdfSuccessPath : _pdfFailedPath,
+                "b5r" => isSuccess ? _pdfSuccessPath : _pdfFailedPath, // B5R文件使用PDF目录
                 _ => throw new ArgumentException($"不支持的文件类型: {fileType}", nameof(fileType))
             };
         }

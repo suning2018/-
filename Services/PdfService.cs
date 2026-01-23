@@ -80,7 +80,7 @@ namespace FtpExcelProcessor.Services
         /// </summary>
         /// <param name="text">PDF文本内容</param>
         /// <param name="sourceFileName">源文件名（用于从文件名提取序列号）</param>
-        private Dictionary<string, string> ExtractHeaderInfo(string text, string sourceFileName = "")
+        internal Dictionary<string, string> ExtractHeaderInfo(string text, string sourceFileName = "")
         {
             var headerInfo = new Dictionary<string, string>();
 
@@ -181,7 +181,7 @@ namespace FtpExcelProcessor.Services
         /// <summary>
         /// 提取诊断数据（性能指标）
         /// </summary>
-        private Dictionary<string, string> ExtractDiagnosticData(string text, Dictionary<string, string> headerInfo)
+        internal Dictionary<string, string> ExtractDiagnosticData(string text, Dictionary<string, string> headerInfo)
         {
             var diagnosticData = new Dictionary<string, string>();
             

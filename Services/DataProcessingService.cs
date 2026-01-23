@@ -101,8 +101,6 @@ namespace FtpExcelProcessor.Services
             {
                 _logger.LogDebug("处理PDF文件: {FileName}", fileInfo.SourceFileName);
 
-                // 1. 根据配置规则更新业务表（生成SQL并存储，不执行）
-                // 数据直接通过DataMappingConfig映射到实际业务表，不再保存到中间表
                 using var connection = new SqlConnection(_connectionString);
                 await connection.OpenAsync();
                 using var transaction = connection.BeginTransaction();
@@ -119,7 +117,6 @@ namespace FtpExcelProcessor.Services
                     }
 
                     await MarkFileAsProcessedAsync(fileInfo.Id, connection, transaction);
-
                     transaction.Commit();
                     _logger.LogInformation("成功处理PDF文件: {FileName}", fileInfo.SourceFileName);
                     if (_databaseLogService != null)
@@ -137,6 +134,52 @@ namespace FtpExcelProcessor.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "处理PDF文件 {FileName} 失败", fileInfo.SourceFileName);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// 处理单个B5R文件的数据
+        /// </summary>
+        private async Task ProcessB5rFileAsync(PdfFileInfoModel fileInfo)
+        {
+            try
+            {
+                _logger.LogDebug("处理B5R文件: {FileName}", fileInfo.SourceFileName);
+
+                using var connection = new SqlConnection(_connectionString);
+                await connection.OpenAsync();
+                using var transaction = connection.BeginTransaction();
+
+                try
+                {
+                    if (_businessTableUpdateService != null)
+                    {
+                        await _businessTableUpdateService.UpdateBusinessTablesFromFileDataAsync(
+                            fileInfo.Id,
+                            "B5R",
+                            connection,
+                            transaction);
+                    }
+
+                    await MarkFileAsProcessedAsync(fileInfo.Id, connection, transaction);
+                    transaction.Commit();
+                    _logger.LogInformation("成功处理B5R文件: {FileName}", fileInfo.SourceFileName);
+                    if (_databaseLogService != null)
+                    {
+                        await _databaseLogService.LogInformationAsync($"成功处理B5R文件: {fileInfo.SourceFileName}", "DataProcessing", "ProcessB5rFile", fileName: fileInfo.SourceFileName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    transaction.Rollback();
+                    _logger.LogError(ex, "处理B5R文件 {FileName} 时发生错误", fileInfo.SourceFileName);
+                    throw;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "处理B5R文件 {FileName} 失败", fileInfo.SourceFileName);
                 throw;
             }
         }
@@ -222,6 +265,13 @@ namespace FtpExcelProcessor.Services
                 {
                     await ProcessPdfFileAsync(fileInfo);
                 }
+
+                // 获取未处理的B5R文件
+                var b5rFiles = await GetUnprocessedFilesAsync<PdfFileInfoModel>("B5R");
+                foreach (var fileInfo in b5rFiles)
+                {
+                    await ProcessB5rFileAsync(fileInfo);
+                }
             }
             catch (Exception ex)
             {
@@ -298,12 +348,13 @@ namespace FtpExcelProcessor.Services
         /// <summary>
         /// 获取未处理文件统计
         /// </summary>
-        public async Task<(int ExcelCount, int PdfCount)> GetUnprocessedFileCountAsync()
+        public async Task<(int ExcelCount, int PdfCount, int B5rCount)> GetUnprocessedFileCountAsync()
         {
             var sql = @"
                 SELECT 
                     SUM(CASE WHEN FileType = 'Excel' AND (Processed = 0 OR Processed IS NULL) THEN 1 ELSE 0 END) AS ExcelCount,
-                    SUM(CASE WHEN FileType = 'PDF' AND (Processed = 0 OR Processed IS NULL) THEN 1 ELSE 0 END) AS PdfCount
+                    SUM(CASE WHEN FileType = 'PDF' AND (Processed = 0 OR Processed IS NULL) THEN 1 ELSE 0 END) AS PdfCount,
+                    SUM(CASE WHEN FileType = 'B5R' AND (Processed = 0 OR Processed IS NULL) THEN 1 ELSE 0 END) AS B5rCount
                 FROM FileInfo";
 
             try
@@ -318,7 +369,8 @@ namespace FtpExcelProcessor.Services
                 {
                     var excelCount = reader.IsDBNull(reader.GetOrdinal("ExcelCount")) ? 0 : reader.GetInt32(reader.GetOrdinal("ExcelCount"));
                     var pdfCount = reader.IsDBNull(reader.GetOrdinal("PdfCount")) ? 0 : reader.GetInt32(reader.GetOrdinal("PdfCount"));
-                    return (excelCount, pdfCount);
+                    var b5rCount = reader.IsDBNull(reader.GetOrdinal("B5rCount")) ? 0 : reader.GetInt32(reader.GetOrdinal("B5rCount"));
+                    return (excelCount, pdfCount, b5rCount);
                 }
             }
             catch (Exception ex)
@@ -326,7 +378,7 @@ namespace FtpExcelProcessor.Services
                 _logger.LogError(ex, "获取未处理文件统计失败");
             }
 
-            return (0, 0);
+            return (0, 0, 0);
         }
 
         /// <summary>

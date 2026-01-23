@@ -22,6 +22,21 @@ namespace FtpExcelProcessor
 
         static async Task Main(string[] args)
         {
+            // 注册全局异常处理
+            AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
+            {
+                Console.WriteLine($"未处理的异常: {e.ExceptionObject}");
+                Serilog.Log.Fatal((Exception)e.ExceptionObject, "未处理的异常导致程序退出");
+                Serilog.Log.CloseAndFlush();
+            };
+
+            TaskScheduler.UnobservedTaskException += (sender, e) =>
+            {
+                Console.WriteLine($"未观察到的任务异常: {e.Exception}");
+                Serilog.Log.Error(e.Exception, "未观察到的任务异常");
+                e.SetObserved();
+            };
+
             try
             {
                 // 加载配置
@@ -89,6 +104,7 @@ namespace FtpExcelProcessor
             catch (Exception ex)
             {
                 Console.WriteLine($"程序执行出错: {ex.Message}");
+                Console.WriteLine($"异常详情: {ex}");
                 Serilog.Log.Fatal(ex, "程序执行出错");
                 try
                 {
@@ -103,10 +119,14 @@ namespace FtpExcelProcessor
                     }
                     await _databaseLogService.LogErrorAsync("程序执行出错", ex, "Program", "Main");
                 }
-                catch { }
+                catch (Exception logEx)
+                {
+                    Console.WriteLine($"记录日志失败: {logEx.Message}");
+                }
             }
             finally
             {
+                Console.WriteLine("\n程序即将退出，按任意键关闭...");
                 Serilog.Log.CloseAndFlush();
                 if (Environment.UserInteractive)
                 {
@@ -121,10 +141,24 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task ContinuousProcessLoopAsync(int checkIntervalSeconds)
         {
+            int loopCount = 0;
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 持续监控已启动，将每 {checkIntervalSeconds} 秒检查一次...\n");
+            
             while (_isRunning)
             {
                 try
                 {
+                    // 检查 _isRunning 状态
+                    if (!_isRunning)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 检测到停止信号，退出循环");
+                        break;
+                    }
+                    
+                    loopCount++;
+                    var startTime = DateTime.Now;
+                    Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 开始第 {loopCount} 次检查...");
+                    
                     // 1. 检查并处理FTP文件
                     await ProcessFtpFilesAsync();
 
@@ -134,23 +168,56 @@ namespace FtpExcelProcessor
                     // 3. 检查并执行SQL
                     await ProcessSqlExecutionAsync();
 
+                    var elapsed = (DateTime.Now - startTime).TotalSeconds;
+                    Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 第 {loopCount} 次检查完成（耗时 {elapsed:F2} 秒），等待 {checkIntervalSeconds} 秒后继续...\n");
+
                     // 等待指定间隔后再次检查
                     if (_isRunning)
                     {
-                        await Task.Delay(checkIntervalSeconds * 1000);
+                        try
+                        {
+                            // 直接使用 Task.Delay，不依赖控制台输入
+                            await Task.Delay(checkIntervalSeconds * 1000);
+                            
+                            if (!_isRunning)
+                            {
+                                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 检测到停止信号，退出循环");
+                                break;
+                            }
+                            
+                            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 等待完成，准备开始第 {loopCount + 1} 次检查...\n");
+                        }
+                        catch (Exception delayEx)
+                        {
+                            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 等待期间出错: {delayEx.Message}");
+                            Serilog.Log.Error(delayEx, "等待期间出错");
+                            // 即使等待出错，也继续循环
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 循环处理出错: {ex.Message}");
-                    await LogErrorAsync("循环处理出错", ex, "Program", "ContinuousProcessLoop");
-                    // 出错后等待一段时间再继续
+                    Console.WriteLine($"异常堆栈: {ex}");
+                    Serilog.Log.Error(ex, "循环处理出错");
+                    try
+                    {
+                        await LogErrorAsync("循环处理出错", ex, "Program", "ContinuousProcessLoop");
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"记录日志失败: {logEx.Message}");
+                    }
+                    // 出错后等待一段时间再继续，避免快速循环导致资源耗尽
                     if (_isRunning)
                     {
+                        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 等待 {checkIntervalSeconds} 秒后继续监控...\n");
                         await Task.Delay(checkIntervalSeconds * 1000);
                     }
                 }
             }
+            
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 持续监控已停止（共执行 {loopCount} 次检查）");
         }
 
         /// <summary>
@@ -165,10 +232,10 @@ namespace FtpExcelProcessor
 
             try
             {
-
                 var ftpService = new FtpService(_configuration, _loggerFactory.CreateLogger<FtpService>(), _databaseLogService);
                 var excelService = new ExcelService(_loggerFactory.CreateLogger<ExcelService>(), _databaseLogService);
                 var pdfService = new PdfService(_loggerFactory.CreateLogger<PdfService>(), _databaseLogService);
+                var b5rService = new B5rService(_loggerFactory.CreateLogger<B5rService>(), pdfService, _databaseLogService);
                 var databaseService = new DatabaseService(_configuration, _loggerFactory.CreateLogger<DatabaseService>(), _databaseLogService);
                 var fileClassificationService = new FileClassificationService(_configuration, _loggerFactory.CreateLogger<FileClassificationService>(), _databaseLogService);
 
@@ -186,9 +253,39 @@ namespace FtpExcelProcessor
                 // 处理每个文件
                 foreach (var filePath in downloadedFiles)
                 {
-                    await ProcessSingleFileAsync(filePath, excelService, pdfService, databaseService, fileClassificationService);
+                    try
+                    {
+                        await ProcessSingleFileAsync(filePath, excelService, pdfService, b5rService, databaseService, fileClassificationService);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 处理文件 {filePath} 时出错: {ex.Message}");
+                        Serilog.Log.Error(ex, "处理文件时出错: {FilePath}", filePath);
+                        try
+                        {
+                            await LogErrorAsync($"处理文件时出错: {filePath}", ex, "FTP", "ProcessFile", Path.GetFileName(filePath));
+                        }
+                        catch (Exception logEx)
+                        {
+                            Console.WriteLine($"记录日志失败: {logEx.Message}");
+                        }
+                    }
                 }
                 Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 文件处理完成\n");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] FTP文件处理出错: {ex.Message}");
+                Console.WriteLine($"异常堆栈: {ex}");
+                Serilog.Log.Error(ex, "FTP文件处理出错");
+                try
+                {
+                    await LogErrorAsync("FTP文件处理出错", ex, "FTP", "ProcessFtpFiles");
+                }
+                catch (Exception logEx)
+                {
+                    Console.WriteLine($"记录日志失败: {logEx.Message}");
+                }
             }
             finally
             {
@@ -208,24 +305,37 @@ namespace FtpExcelProcessor
 
             try
             {
-
                 var dataProcessingService = new DataProcessingService(
                     _configuration,
                     _loggerFactory.CreateLogger<DataProcessingService>(),
                     _databaseLogService);
 
-                var (excelCount, pdfCount) = await dataProcessingService.GetUnprocessedFileCountAsync();
-                if (excelCount == 0 && pdfCount == 0)
+                var (excelCount, pdfCount, b5rCount) = await dataProcessingService.GetUnprocessedFileCountAsync();
+                if (excelCount == 0 && pdfCount == 0 && b5rCount == 0)
                 {
                     return; // 没有需要处理的数据
                 }
 
-                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现未处理数据: Excel={excelCount}, PDF={pdfCount}，开始映射...");
-                await LogInfoAsync($"开始数据处理，未处理文件: Excel={excelCount}, PDF={pdfCount}", "DataProcessing", "ProcessData");
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 发现未处理数据: Excel={excelCount}, PDF={pdfCount}, B5R={b5rCount}，开始映射...");
+                await LogInfoAsync($"开始数据处理，未处理文件: Excel={excelCount}, PDF={pdfCount}, B5R={b5rCount}", "DataProcessing", "ProcessData");
 
                 await dataProcessingService.ProcessUnprocessedDataAsync();
                 Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 数据映射完成（SQL已生成并存储）\n");
                 await LogInfoAsync("数据处理完成，SQL已生成并存储", "DataProcessing", "ProcessData");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 数据映射处理出错: {ex.Message}");
+                Console.WriteLine($"异常堆栈: {ex}");
+                Serilog.Log.Error(ex, "数据映射处理出错");
+                try
+                {
+                    await LogErrorAsync("数据映射处理出错", ex, "DataProcessing", "ProcessData");
+                }
+                catch (Exception logEx)
+                {
+                    Console.WriteLine($"记录日志失败: {logEx.Message}");
+                }
             }
             finally
             {
@@ -363,6 +473,7 @@ namespace FtpExcelProcessor
             string filePath,
             ExcelService excelService,
             PdfService pdfService,
+            B5rService b5rService,
             DatabaseService databaseService,
             FileClassificationService fileClassificationService)
         {
@@ -394,6 +505,16 @@ namespace FtpExcelProcessor
                     await databaseService.SavePdfDataAsync(pdfFileData);
                     Console.WriteLine("    PDF数据已保存到数据库");
                     await LogInfoAsync("PDF数据已保存到数据库", "Database", "SavePdfData", fileName);
+                    isSuccess = true;
+                }
+                else if (extension == ".b5r")
+                {
+                    fileType = "B5R";
+                    var b5rFileData = await b5rService.ReadB5rFileAsync(filePath);
+                    Console.WriteLine($"    读取到 {b5rFileData.DiagnosticData.Count} 条诊断数据");
+                    await databaseService.SaveB5rDataAsync(b5rFileData);
+                    Console.WriteLine("    B5R数据已保存到数据库");
+                    await LogInfoAsync("B5R数据已保存到数据库", "Database", "SaveB5rData", fileName);
                     isSuccess = true;
                 }
                 else

@@ -134,6 +134,17 @@ namespace FtpExcelProcessor.Services
                 }
             }
 
+            // 3. 从PDF目录下载B5R文件（B5R文件通常也在PDF目录）
+            var b5rFiles = await GetFileListAsync(_pdfRemotePath, new[] { ".b5r" });
+            foreach (var fileName in b5rFiles)
+            {
+                var localPath = await DownloadFileAsync(fileName, _pdfRemotePath);
+                if (!string.IsNullOrEmpty(localPath))
+                {
+                    downloadedFiles.Add(localPath);
+                }
+            }
+
             return downloadedFiles;
         }
 
