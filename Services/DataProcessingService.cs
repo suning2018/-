@@ -318,7 +318,7 @@ namespace FtpExcelProcessor.Services
                         };
                         files.Add((T)(object)fileInfo);
                     }
-                    else if (fileType == "PDF" && typeof(T) == typeof(PdfFileInfoModel))
+                    else if ((fileType == "PDF" || fileType == "B5R") && typeof(T) == typeof(PdfFileInfoModel))
                     {
                         var fileInfo = new PdfFileInfoModel
                         {
