@@ -235,7 +235,8 @@ namespace FtpExcelProcessor
                 var ftpService = new FtpService(_configuration, _loggerFactory.CreateLogger<FtpService>(), _databaseLogService);
                 var excelService = new ExcelService(_loggerFactory.CreateLogger<ExcelService>(), _databaseLogService);
                 var pdfService = new PdfService(_loggerFactory.CreateLogger<PdfService>(), _databaseLogService);
-                var b5rService = new B5rService(_loggerFactory.CreateLogger<B5rService>(), pdfService, _databaseLogService);
+                var b5rXmlService = new B5rXmlService(_loggerFactory.CreateLogger<B5rXmlService>());
+                var b5rService = new B5rService(_loggerFactory.CreateLogger<B5rService>(), b5rXmlService, _databaseLogService);
                 var databaseService = new DatabaseService(_configuration, _loggerFactory.CreateLogger<DatabaseService>(), _databaseLogService);
                 var fileClassificationService = new FileClassificationService(_configuration, _loggerFactory.CreateLogger<FileClassificationService>(), _databaseLogService);
 
@@ -255,7 +256,7 @@ namespace FtpExcelProcessor
                 {
                     try
                     {
-                        await ProcessSingleFileAsync(filePath, excelService, pdfService, b5rService, databaseService, fileClassificationService);
+                        await ProcessSingleFileAsync(filePath, excelService, pdfService, b5rXmlService, b5rService, databaseService, fileClassificationService);
                     }
                     catch (Exception ex)
                     {
@@ -473,6 +474,7 @@ namespace FtpExcelProcessor
             string filePath,
             ExcelService excelService,
             PdfService pdfService,
+            B5rXmlService b5rXmlService,
             B5rService b5rService,
             DatabaseService databaseService,
             FileClassificationService fileClassificationService)

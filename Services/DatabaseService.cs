@@ -295,12 +295,13 @@ namespace FtpExcelProcessor.Services
             }
         }
 
+
         /// <summary>
-        /// 保存B5R数据到数据库
+        /// 保存B5R数据到数据库（使用XML解析的新版）
         /// </summary>
         public async Task SaveB5rDataAsync(B5rFileData fileData)
         {
-            if (fileData == null || (fileData.DiagnosticData == null || fileData.DiagnosticData.Count == 0))
+            if (fileData == null || (fileData.AllFeatures == null || fileData.AllFeatures.Count == 0))
             {
                 _logger.LogWarning("B5R文件数据为空，跳过保存: {FileName}", fileData?.SourceFileName ?? "Unknown");
                 return;
@@ -310,34 +311,34 @@ namespace FtpExcelProcessor.Services
             {
                 using var connection = await CreateConnectionAsync();
                 using var transaction = connection.BeginTransaction();
-                
+
                 try
                 {
                     var importTime = fileData.ImportTime;
 
                     // 1. 保存文件信息
                     var fileInfoSql = @"
-                        INSERT INTO FileInfo (SourceFileName, FileType, PartName, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime)
-                        VALUES (@SourceFileName, @FileType, @PartName, @TestId, @Operator, @TestDate, @Machine, @QC20W, @LastCalibration, @ImportTime);
-                        SELECT CAST(SCOPE_IDENTITY() AS INT);
-                    ";
+                INSERT INTO FileInfo (SourceFileName, FileType, PartName, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime)
+                VALUES (@SourceFileName, @FileType, @PartName, @TestId, @Operator, @TestDate, @Machine, @QC20W, @LastCalibration, @ImportTime);
+                SELECT CAST(SCOPE_IDENTITY() AS INT);
+            ";
 
                     var machineValue = fileData.HeaderInfo.GetValueOrDefault("Machine", string.Empty);
                     var partName = fileData.HeaderInfo.GetValueOrDefault("PartName", string.Empty);
-                    
+
                     var fileInfoParams = new Dictionary<string, object>
-                    {
-                        { "@SourceFileName", fileData.SourceFileName },
-                        { "@FileType", fileData.FileType },
-                        { "@PartName", partName },
-                        { "@TestId", fileData.HeaderInfo.GetValueOrDefault("TestId", string.Empty) },
-                        { "@Operator", fileData.HeaderInfo.GetValueOrDefault("Operator", string.Empty) },
-                        { "@TestDate", fileData.HeaderInfo.GetValueOrDefault("TestDate", string.Empty) },
-                        { "@Machine", machineValue },
-                        { "@QC20W", fileData.HeaderInfo.GetValueOrDefault("QC20W", string.Empty) },
-                        { "@LastCalibration", fileData.HeaderInfo.GetValueOrDefault("LastCalibration", string.Empty) },
-                        { "@ImportTime", importTime }
-                    };
+            {
+                { "@SourceFileName", fileData.SourceFileName },
+                { "@FileType", fileData.FileType },
+                { "@PartName", partName },
+                { "@TestId", fileData.HeaderInfo.GetValueOrDefault("TestId", string.Empty) },
+                { "@Operator", fileData.HeaderInfo.GetValueOrDefault("Operator", string.Empty) },
+                { "@TestDate", fileData.HeaderInfo.GetValueOrDefault("TestDate", string.Empty) },
+                { "@Machine", machineValue },
+                { "@QC20W", fileData.HeaderInfo.GetValueOrDefault("QC20W", string.Empty) },
+                { "@LastCalibration", fileData.HeaderInfo.GetValueOrDefault("LastCalibration", string.Empty) },
+                { "@ImportTime", importTime }
+            };
 
                     var fileInfoId = await ExecuteScalarAsync(fileInfoSql, fileInfoParams, connection, transaction);
                     if (fileInfoId == null || !int.TryParse(fileInfoId.ToString(), out int fileInfoIdValue))
@@ -345,46 +346,69 @@ namespace FtpExcelProcessor.Services
                         throw new Exception("无法获取FileInfo Id");
                     }
 
-                    // 2. 保存诊断数据
-                    if (fileData.DiagnosticData != null)
+                    // 2. 只保存有效数据（MustHave + ShouldHave）到FileData表
+                    int insertedCount = 0;
+                    int mustHaveCount = 0;
+                    int shouldHaveCount = 0;
+
+                    foreach (var feature in fileData.ValidFeatures)
                     {
-                        int rowNum = 1;
-                        foreach (var diagnosticItem in fileData.DiagnosticData)
+                        if (string.IsNullOrWhiteSpace(feature.Name) || string.IsNullOrWhiteSpace(feature.Value))
                         {
-                            if (string.IsNullOrWhiteSpace(diagnosticItem.Value))
-                            {
-                                continue;
-                            }
-                            
-                            var insertSql = @"
-                                INSERT INTO FileData (FileInfoId, SourceFileName, FileType, RowNumber, ColumnName, ColumnValue, ImportTime)
-                                VALUES (@FileInfoId, @SourceFileName, @FileType, @RowNumber, @ColumnName, @ColumnValue, @ImportTime);
-                            ";
+                            continue;
+                        }
 
-                            var columnName = diagnosticItem.Key.Length > 200 ? diagnosticItem.Key.Substring(0, 200) : diagnosticItem.Key;
-                            var columnValue = diagnosticItem.Value ?? string.Empty;
-                            if (columnValue.Length > 10000)
-                            {
-                                columnValue = columnValue.Substring(0, 10000);
-                            }
+                        // ColumnName使用带轴标识的名称
+                        var columnName = Models.B5rAxisMapping.GetColumnName(feature.Name, feature.AxisIdentifier);
 
-                            var parameters = new Dictionary<string, object>
-                            {
-                                { "@FileInfoId", fileInfoIdValue },
-                                { "@SourceFileName", fileData.SourceFileName },
-                                { "@FileType", fileData.FileType },
-                                { "@RowNumber", rowNum++ },
-                                { "@ColumnName", columnName },
-                                { "@ColumnValue", columnValue },
-                                { "@ImportTime", importTime }
-                            };
+                        var insertSql = @"
+                    INSERT INTO FileData (FileInfoId, SourceFileName, FileType, RowNumber, ColumnName, ColumnValue, ImportTime)
+                    VALUES (@FileInfoId, @SourceFileName, @FileType, @RowNumber, @ColumnName, @ColumnValue, @ImportTime);
+                ";
 
-                            await ExecuteNonQueryAsync(insertSql, parameters, connection, transaction);
+                        var truncatedColumnName = columnName.Length > 200 ? columnName.Substring(0, 200) : columnName;
+
+                        // 获取单位并添加到数值后面
+                        var unit = Models.B5rAxisMapping.GetUnit(feature.DataType);
+                        var columnValue = feature.Value ?? string.Empty;
+                        if (!string.IsNullOrEmpty(unit))
+                        {
+                            columnValue = $"{columnValue} {unit}";
+                        }
+
+                        if (columnValue.Length > 10000)
+                        {
+                            columnValue = columnValue.Substring(0, 10000);
+                        }
+
+                        var parameters = new Dictionary<string, object>
+                {
+                    { "@FileInfoId", fileInfoIdValue },
+                    { "@SourceFileName", fileData.SourceFileName },
+                    { "@FileType", fileData.FileType },
+                    { "@RowNumber", 1 }, // B5R特征数据不使用行号，统一设为1
+                    { "@ColumnName", truncatedColumnName },
+                    { "@ColumnValue", columnValue },
+                    { "@ImportTime", importTime }
+                };
+
+                        await ExecuteNonQueryAsync(insertSql, parameters, connection, transaction);
+                        insertedCount++;
+
+                        if (feature.IsMustHave)
+                        {
+                            mustHaveCount++;
+                        }
+                        else if (feature.IsShouldHave)
+                        {
+                            shouldHaveCount++;
                         }
                     }
 
                     transaction.Commit();
-                    _logger.LogInformation("成功保存B5R文件信息和数据到数据库，源文件: {FileName}", fileData.SourceFileName);
+                    _logger.LogInformation(
+                        "成功保存B5R文件信息和有效数据到数据库，源文件: {FileName}, 插入{InsertedCount}条数据(MustHave:{MustHaveCount}, ShouldHave:{ShouldHaveCount}), 跳过垃圾数据:{GarbageCount}",
+                        fileData.SourceFileName, insertedCount, mustHaveCount, shouldHaveCount, fileData.GarbageFeatures.Count);
                 }
                 catch (Exception ex)
                 {
@@ -399,6 +423,111 @@ namespace FtpExcelProcessor.Services
                 throw;
             }
         }
+
+        ///// <summary>
+        ///// 保存B5R数据到数据库
+        ///// </summary>
+        //public async Task SaveB5rDataAsync(B5rFileData fileData)
+        //{
+        //    if (fileData == null || (fileData.DiagnosticData == null || fileData.DiagnosticData.Count == 0))
+        //    {
+        //        _logger.LogWarning("B5R文件数据为空，跳过保存: {FileName}", fileData?.SourceFileName ?? "Unknown");
+        //        return;
+        //    }
+
+        //    try
+        //    {
+        //        using var connection = await CreateConnectionAsync();
+        //        using var transaction = connection.BeginTransaction();
+
+        //        try
+        //        {
+        //            var importTime = fileData.ImportTime;
+
+        //            // 1. 保存文件信息
+        //            var fileInfoSql = @"
+        //                INSERT INTO FileInfo (SourceFileName, FileType, PartName, TestId, Operator, TestDate, Machine, QC20W, LastCalibration, ImportTime)
+        //                VALUES (@SourceFileName, @FileType, @PartName, @TestId, @Operator, @TestDate, @Machine, @QC20W, @LastCalibration, @ImportTime);
+        //                SELECT CAST(SCOPE_IDENTITY() AS INT);
+        //            ";
+
+        //            var machineValue = fileData.HeaderInfo.GetValueOrDefault("Machine", string.Empty);
+        //            var partName = fileData.HeaderInfo.GetValueOrDefault("PartName", string.Empty);
+
+        //            var fileInfoParams = new Dictionary<string, object>
+        //            {
+        //                { "@SourceFileName", fileData.SourceFileName },
+        //                { "@FileType", fileData.FileType },
+        //                { "@PartName", partName },
+        //                { "@TestId", fileData.HeaderInfo.GetValueOrDefault("TestId", string.Empty) },
+        //                { "@Operator", fileData.HeaderInfo.GetValueOrDefault("Operator", string.Empty) },
+        //                { "@TestDate", fileData.HeaderInfo.GetValueOrDefault("TestDate", string.Empty) },
+        //                { "@Machine", machineValue },
+        //                { "@QC20W", fileData.HeaderInfo.GetValueOrDefault("QC20W", string.Empty) },
+        //                { "@LastCalibration", fileData.HeaderInfo.GetValueOrDefault("LastCalibration", string.Empty) },
+        //                { "@ImportTime", importTime }
+        //            };
+
+        //            var fileInfoId = await ExecuteScalarAsync(fileInfoSql, fileInfoParams, connection, transaction);
+        //            if (fileInfoId == null || !int.TryParse(fileInfoId.ToString(), out int fileInfoIdValue))
+        //            {
+        //                throw new Exception("无法获取FileInfo Id");
+        //            }
+
+        //            // 2. 保存诊断数据
+        //            if (fileData.DiagnosticData != null)
+        //            {
+        //                int rowNum = 1;
+        //                foreach (var diagnosticItem in fileData.DiagnosticData)
+        //                {
+        //                    if (string.IsNullOrWhiteSpace(diagnosticItem.Value))
+        //                    {
+        //                        continue;
+        //                    }
+
+        //                    var insertSql = @"
+        //                        INSERT INTO FileData (FileInfoId, SourceFileName, FileType, RowNumber, ColumnName, ColumnValue, ImportTime)
+        //                        VALUES (@FileInfoId, @SourceFileName, @FileType, @RowNumber, @ColumnName, @ColumnValue, @ImportTime);
+        //                    ";
+
+        //                    var columnName = diagnosticItem.Key.Length > 200 ? diagnosticItem.Key.Substring(0, 200) : diagnosticItem.Key;
+        //                    var columnValue = diagnosticItem.Value ?? string.Empty;
+        //                    if (columnValue.Length > 10000)
+        //                    {
+        //                        columnValue = columnValue.Substring(0, 10000);
+        //                    }
+
+        //                    var parameters = new Dictionary<string, object>
+        //                    {
+        //                        { "@FileInfoId", fileInfoIdValue },
+        //                        { "@SourceFileName", fileData.SourceFileName },
+        //                        { "@FileType", fileData.FileType },
+        //                        { "@RowNumber", rowNum++ },
+        //                        { "@ColumnName", columnName },
+        //                        { "@ColumnValue", columnValue },
+        //                        { "@ImportTime", importTime }
+        //                    };
+
+        //                    await ExecuteNonQueryAsync(insertSql, parameters, connection, transaction);
+        //                }
+        //            }
+
+        //            transaction.Commit();
+        //            _logger.LogInformation("成功保存B5R文件信息和数据到数据库，源文件: {FileName}", fileData.SourceFileName);
+        //        }
+        //        catch (Exception ex)
+        //        {
+        //            transaction.Rollback();
+        //            _logger.LogError(ex, "保存B5R数据到数据库失败，源文件: {FileName}", fileData.SourceFileName);
+        //            throw;
+        //        }
+        //    }
+        //    catch (Exception ex)
+        //    {
+        //        _logger.LogError(ex, "保存B5R数据到数据库时发生错误");
+        //        throw;
+        //    }
+        //}
 
         /// <summary>
         /// 执行非查询命令（INSERT, UPDATE, DELETE）
