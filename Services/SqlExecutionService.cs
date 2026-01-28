@@ -344,13 +344,13 @@ namespace FtpExcelProcessor.Services
                 
                 stopwatch.Stop();
                 
-                // 如果受影响行数为0，不标记为执行成功（将在8小时后再次执行）
+                // 如果受影响行数为0，不标记为执行成功（将在8小时后再次执行，超过3天则不再执行）
                 if (rowsAffected == 0)
                 {
                     isSuccess = false;
-                    errorMessage = "受影响行数为0，将在8小时后再次执行";
+                    errorMessage = "受影响行数为0，将在8小时后再次执行（超过3天则不再执行）";
                     _logger.LogWarning(
-                        "SQL执行完成但受影响行数为0: {ConfigName}, 耗时: {Duration}ms，将在8小时后再次执行",
+                        "SQL执行完成但受影响行数为0: {ConfigName}, 耗时: {Duration}ms，将在8小时后再次执行（超过3天则不再执行）",
                         config.ConfigName, stopwatch.ElapsedMilliseconds);
                 }
                 else
@@ -425,8 +425,10 @@ namespace FtpExcelProcessor.Services
 
         /// <summary>
         /// 获取待执行的SQL配置列表
-        /// 规则：8小时内不重复执行（无论成功或失败）
-        /// 注意：受影响行数为0的数据也会在8小时后再次执行
+        /// 规则：
+        /// 1. 8小时内不重复执行（无论成功或失败）
+        /// 2. 受影响行数为0的数据会在8小时后再次执行
+        /// 3. 受影响行数为0的数据超过3天后不再执行
         /// </summary>
         public async Task<List<(int Id, string ConfigName, string SqlStatement, string? Parameters)>> GetPendingSqlConfigsAsync()
         {
@@ -447,6 +449,11 @@ namespace FtpExcelProcessor.Services
                       log.ConfigId IS NULL
                       -- 或者最后一次执行（无论成功或失败）超过8小时
                       OR (log.ExecutionTime < DATEADD(hour, -8, GETDATE()))
+                  )
+                  -- 排除：受影响行数为0且执行时间超过3天的情况（不再执行）
+                  AND NOT (
+                      log.RowsAffected = 0 
+                      AND log.ExecutionTime < DATEADD(day, -3, GETDATE())
                   )
                 ORDER BY c.ExecutionOrder, c.Id";
 
@@ -570,11 +577,11 @@ namespace FtpExcelProcessor.Services
                 command.Parameters.AddWithValue("@Id", configId);
                 command.Parameters.AddWithValue("@LastExecuteTime", DateTime.Now);
                 
-                // 受影响行数为0时，标记为需要重复执行（将在8小时后再次执行），不标记为成功
+                // 受影响行数为0时，标记为需要重复执行（将在8小时后再次执行，超过3天则不再执行），不标记为成功
                 string resultMessage;
                 if (rowsAffected == 0)
                 {
-                    resultMessage = "受影响行数为0，将在8小时后再次执行";
+                    resultMessage = "受影响行数为0，将在8小时后再次执行（超过3天则不再执行）";
                 }
                 else if (isSuccess)
                 {

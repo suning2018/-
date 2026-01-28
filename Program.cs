@@ -20,68 +20,235 @@ namespace FtpExcelProcessor
         private static bool _isRunning = true;
         private static readonly SemaphoreSlim _processingLock = new SemaphoreSlim(1, 1);
 
-        static async Task Main(string[] args)
+        // 同步入口点，包装异步 Main 方法
+        static int Main(string[] args)
         {
-            // 注册全局异常处理
+            try
+            {
+                // 运行异步 Main 方法并等待完成
+                MainAsync(args).GetAwaiter().GetResult();
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    string errorLogPath = Path.Combine(Directory.GetCurrentDirectory(), "error.log");
+                    var errorMsg = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 程序入口点异常: {ex.Message}\n";
+                    var fullError = $"完整异常: {ex}\n\n";
+                    
+                    Console.WriteLine($"严重错误: {ex.Message}");
+                    Console.WriteLine($"异常详情: {ex}");
+                    
+                    try
+                    {
+                        File.AppendAllText(errorLogPath, errorMsg + fullError);
+                    }
+                    catch { }
+                }
+                catch { }
+                return 1;
+            }
+        }
+
+        static async Task MainAsync(string[] args)
+        {
+            // 首先尝试写入简单的错误日志文件（即使其他初始化失败）
+            string errorLogPath = Path.Combine(Directory.GetCurrentDirectory(), "error.log");
+            
+            // 注册全局异常处理（必须在最开始注册）
             AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
             {
-                Console.WriteLine($"未处理的异常: {e.ExceptionObject}");
-                Serilog.Log.Fatal((Exception)e.ExceptionObject, "未处理的异常导致程序退出");
-                Serilog.Log.CloseAndFlush();
+                try
+                {
+                    var errorMsg = $"未处理的异常: {e.ExceptionObject}";
+                    Console.WriteLine(errorMsg);
+                    
+                    // 写入错误日志文件
+                    try
+                    {
+                        File.AppendAllText(errorLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {errorMsg}\n");
+                        if (e.ExceptionObject is Exception exception)
+                        {
+                            File.AppendAllText(errorLogPath, $"堆栈跟踪: {exception}\n\n");
+                        }
+                    }
+                    catch { }
+                    
+                    if (e.ExceptionObject is Exception exception2)
+                    {
+                        try
+                        {
+                            Serilog.Log.Fatal(exception2, "未处理的异常导致程序退出");
+                        }
+                        catch { }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            Serilog.Log.Fatal("未处理的异常导致程序退出: {Exception}", e.ExceptionObject);
+                        }
+                        catch { }
+                    }
+                    try
+                    {
+                        Serilog.Log.CloseAndFlush();
+                    }
+                    catch { }
+                }
+                catch { }
             };
 
             TaskScheduler.UnobservedTaskException += (sender, e) =>
             {
-                Console.WriteLine($"未观察到的任务异常: {e.Exception}");
-                Serilog.Log.Error(e.Exception, "未观察到的任务异常");
-                e.SetObserved();
+                try
+                {
+                    var errorMsg = $"未观察到的任务异常: {e.Exception}";
+                    Console.WriteLine(errorMsg);
+                    
+                    // 写入错误日志文件
+                    try
+                    {
+                        File.AppendAllText(errorLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {errorMsg}\n");
+                        File.AppendAllText(errorLogPath, $"堆栈跟踪: {e.Exception}\n\n");
+                    }
+                    catch { }
+                    
+                    try
+                    {
+                        Serilog.Log.Error(e.Exception, "未观察到的任务异常");
+                    }
+                    catch { }
+                    e.SetObserved();
+                }
+                catch { }
             };
 
             try
             {
                 // 加载配置
-                _configuration = new ConfigurationBuilder()
-                    .SetBasePath(Directory.GetCurrentDirectory())
-                    .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                    .Build();
+                try
+                {
+                    _configuration = new ConfigurationBuilder()
+                        .SetBasePath(Directory.GetCurrentDirectory())
+                        .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                        .Build();
+                }
+                catch (Exception configEx)
+                {
+                    Console.WriteLine($"错误: 无法加载配置文件 appsettings.json");
+                    Console.WriteLine($"异常详情: {configEx.Message}");
+                    Console.WriteLine("程序无法继续运行，按任意键退出...");
+                    Console.ReadKey();
+                    return;
+                }
 
                 // 初始化日志
-                InitializeLogging(_configuration);
+                try
+                {
+                    InitializeLogging(_configuration);
+                }
+                catch (Exception logInitEx)
+                {
+                    Console.WriteLine($"警告: 日志初始化失败: {logInitEx.Message}");
+                    Console.WriteLine("程序将继续运行，但日志功能可能受限。\n");
+                }
                 
                 // 创建日志工厂
-                _loggerFactory = LoggerFactory.Create(builder =>
+                try
                 {
-                    builder.AddConfiguration(_configuration.GetSection("Logging")).AddSerilog();
-                });
+                    _loggerFactory = LoggerFactory.Create(builder =>
+                    {
+                        builder.AddConfiguration(_configuration.GetSection("Logging")).AddSerilog();
+                    });
+                }
+                catch (Exception factoryEx)
+                {
+                    Console.WriteLine($"警告: 日志工厂创建失败: {factoryEx.Message}");
+                    Console.WriteLine("程序将继续运行，但日志功能可能受限。\n");
+                    _loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+                }
 
                 // 初始化数据库日志服务
                 var enableDatabaseLog = bool.Parse(_configuration["LogSettings:EnableDatabaseLog"] ?? "true");
                 if (enableDatabaseLog)
                 {
-                    _databaseLogService = new DatabaseLogService(_configuration, _loggerFactory.CreateLogger<DatabaseLogService>());
-                    await LogInfoAsync("程序启动", "Program", "Main");
+                    try
+                    {
+                        _databaseLogService = new DatabaseLogService(_configuration, _loggerFactory.CreateLogger<DatabaseLogService>());
+                        await LogInfoAsync("程序启动", "Program", "Main");
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"警告: 数据库日志服务初始化失败: {logEx.Message}");
+                        Console.WriteLine("程序将继续运行，但不会记录日志到数据库。\n");
+                        Serilog.Log.Warning(logEx, "数据库日志服务初始化失败");
+                        _databaseLogService = null;
+                    }
                 }
 
                 Console.WriteLine("=== FTP文件处理程序（持续监控模式）===\n");
 
                 // 测试数据库连接
-                var databaseService = new DatabaseService(_configuration, _loggerFactory.CreateLogger<DatabaseService>(), _databaseLogService);
-                var (isConnected, message) = await databaseService.TestConnectionAsync();
-                if (!isConnected)
+                try
                 {
-                    Console.WriteLine($"警告: {message}\n请检查数据库连接配置后重试。");
-                    await LogWarningAsync($"数据库连接失败: {message}", "Database", "TestConnection");
-                    return;
+                    var databaseService = new DatabaseService(_configuration, _loggerFactory.CreateLogger<DatabaseService>(), _databaseLogService);
+                    var (isConnected, message) = await databaseService.TestConnectionAsync();
+                    if (!isConnected)
+                    {
+                        Console.WriteLine($"警告: {message}");
+                        Console.WriteLine("程序将继续运行，但数据库相关功能可能无法使用。");
+                        Console.WriteLine("请检查数据库连接配置。\n");
+                        await LogWarningAsync($"数据库连接失败: {message}", "Database", "TestConnection");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"数据库连接: {message}\n");
+                        await LogInfoAsync($"数据库连接成功: {message}", "Database", "TestConnection");
+                    }
                 }
-                Console.WriteLine($"数据库连接: {message}\n");
-                await LogInfoAsync($"数据库连接成功: {message}", "Database", "TestConnection");
+                catch (Exception dbEx)
+                {
+                    Console.WriteLine($"警告: 数据库连接测试时发生异常: {dbEx.Message}");
+                    Console.WriteLine("程序将继续运行，但数据库相关功能可能无法使用。");
+                    Console.WriteLine("请检查数据库连接配置。\n");
+                    Serilog.Log.Warning(dbEx, "数据库连接测试异常");
+                    try
+                    {
+                        await LogWarningAsync($"数据库连接测试异常: {dbEx.Message}", "Database", "TestConnection");
+                    }
+                    catch { }
+                }
 
                 // 确保目录存在
-                var downloadPath = _configuration["FileSettings:LocalDownloadPath"] ?? "Downloads";
-                Directory.CreateDirectory(downloadPath);
+                try
+                {
+                    var downloadPath = _configuration["FileSettings:LocalDownloadPath"] ?? "Downloads";
+                    Directory.CreateDirectory(downloadPath);
+                }
+                catch (Exception dirEx)
+                {
+                    Console.WriteLine($"警告: 创建下载目录失败: {dirEx.Message}");
+                    Serilog.Log.Warning(dirEx, "创建下载目录失败");
+                }
 
                 // 获取检查间隔配置
-                var checkIntervalSeconds = int.Parse(_configuration["ScheduleSettings:CheckIntervalSeconds"] ?? "30");
+                int checkIntervalSeconds = 30;
+                try
+                {
+                    var intervalStr = _configuration["ScheduleSettings:CheckIntervalSeconds"] ?? "30";
+                    if (!int.TryParse(intervalStr, out checkIntervalSeconds) || checkIntervalSeconds <= 0)
+                    {
+                        checkIntervalSeconds = 30;
+                        Console.WriteLine($"警告: 检查间隔配置无效，使用默认值 30 秒");
+                    }
+                }
+                catch (Exception configEx)
+                {
+                    Console.WriteLine($"警告: 读取检查间隔配置失败: {configEx.Message}，使用默认值 30 秒");
+                    Serilog.Log.Warning(configEx, "读取检查间隔配置失败");
+                }
                 Console.WriteLine($"检查间隔: {checkIntervalSeconds} 秒");
                 Console.WriteLine("程序将持续监控：");
                 Console.WriteLine("  1. FTP服务器是否有新文件");
@@ -103,35 +270,83 @@ namespace FtpExcelProcessor
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"程序执行出错: {ex.Message}");
-                Console.WriteLine($"异常详情: {ex}");
-                Serilog.Log.Fatal(ex, "程序执行出错");
                 try
                 {
-                    if (_databaseLogService == null)
+                    var errorMsg = $"程序执行出错: {ex.Message}";
+                    var fullError = $"异常详情: {ex}";
+                    Console.WriteLine(errorMsg);
+                    Console.WriteLine(fullError);
+                    
+                    // 写入错误日志文件
+                    try
                     {
-                        var config = new ConfigurationBuilder()
-                            .SetBasePath(Directory.GetCurrentDirectory())
-                            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-                            .Build();
-                        var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
-                        _databaseLogService = new DatabaseLogService(config, loggerFactory.CreateLogger<DatabaseLogService>());
+                        File.AppendAllText(errorLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {errorMsg}\n");
+                        File.AppendAllText(errorLogPath, $"{fullError}\n\n");
                     }
-                    await _databaseLogService.LogErrorAsync("程序执行出错", ex, "Program", "Main");
+                    catch { }
+                    
+                    try
+                    {
+                        Serilog.Log.Fatal(ex, "程序执行出错");
+                    }
+                    catch { }
+                    
+                    try
+                    {
+                        if (_databaseLogService == null && _configuration != null)
+                        {
+                            try
+                            {
+                                var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+                                _databaseLogService = new DatabaseLogService(_configuration, loggerFactory.CreateLogger<DatabaseLogService>());
+                            }
+                            catch { }
+                        }
+                        if (_databaseLogService != null)
+                        {
+                            await _databaseLogService.LogErrorAsync("程序执行出错", ex, "Program", "Main");
+                        }
+                    }
+                    catch (Exception logEx)
+                    {
+                        Console.WriteLine($"记录日志失败: {logEx.Message}");
+                    }
                 }
-                catch (Exception logEx)
+                catch (Exception fatalEx)
                 {
-                    Console.WriteLine($"记录日志失败: {logEx.Message}");
+                    try
+                    {
+                        Console.WriteLine($"严重错误: 异常处理过程中发生错误: {fatalEx.Message}");
+                        File.AppendAllText(errorLogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 严重错误: {fatalEx}\n\n");
+                    }
+                    catch { }
                 }
             }
             finally
             {
-                Console.WriteLine("\n程序即将退出，按任意键关闭...");
-                Serilog.Log.CloseAndFlush();
-                if (Environment.UserInteractive)
+                try
                 {
-                    Console.WriteLine("\n程序已停止。");
-                    WaitForExit();
+                    Console.WriteLine("\n程序即将退出...");
+                    Serilog.Log.CloseAndFlush();
+                    if (Environment.UserInteractive)
+                    {
+                        Console.WriteLine("\n程序已停止。");
+                        WaitForExit();
+                    }
+                    else
+                    {
+                        // 非交互式环境，等待3秒后退出
+                        Task.Delay(3000).Wait();
+                    }
+                }
+                catch (Exception finallyEx)
+                {
+                    // 忽略 finally 块中的异常
+                    try
+                    {
+                        Console.WriteLine($"清理过程中出错: {finallyEx.Message}");
+                    }
+                    catch { }
                 }
             }
         }
@@ -557,10 +772,26 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task LogInfoAsync(string message, string category, string operation, string? fileName = null)
         {
-            Serilog.Log.Information(message);
-            if (_databaseLogService != null)
+            try
             {
-                await _databaseLogService.LogInformationAsync(message, category, operation, fileName);
+                Serilog.Log.Information(message);
+                if (_databaseLogService != null)
+                {
+                    try
+                    {
+                        await _databaseLogService.LogInformationAsync(message, category, operation, fileName);
+                    }
+                    catch (Exception dbLogEx)
+                    {
+                        // 数据库日志失败不影响程序运行
+                        Serilog.Log.Warning(dbLogEx, "数据库日志记录失败");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // 日志记录失败不应该导致程序崩溃
+                try { Console.WriteLine($"日志记录失败: {ex.Message}"); } catch { }
             }
         }
 
@@ -569,10 +800,26 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task LogWarningAsync(string message, string category, string operation, string? fileName = null)
         {
-            Serilog.Log.Warning(message);
-            if (_databaseLogService != null)
+            try
             {
-                await _databaseLogService.LogWarningAsync(message, category, operation, fileName);
+                Serilog.Log.Warning(message);
+                if (_databaseLogService != null)
+                {
+                    try
+                    {
+                        await _databaseLogService.LogWarningAsync(message, category, operation, fileName);
+                    }
+                    catch (Exception dbLogEx)
+                    {
+                        // 数据库日志失败不影响程序运行
+                        Serilog.Log.Warning(dbLogEx, "数据库日志记录失败");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // 日志记录失败不应该导致程序崩溃
+                try { Console.WriteLine($"日志记录失败: {ex.Message}"); } catch { }
             }
         }
 
@@ -581,10 +828,26 @@ namespace FtpExcelProcessor
         /// </summary>
         static async Task LogErrorAsync(string message, Exception ex, string category, string operation, string? fileName = null)
         {
-            Serilog.Log.Error(ex, message);
-            if (_databaseLogService != null)
+            try
             {
-                await _databaseLogService.LogErrorAsync(message, ex, category, operation, fileName);
+                Serilog.Log.Error(ex, message);
+                if (_databaseLogService != null)
+                {
+                    try
+                    {
+                        await _databaseLogService.LogErrorAsync(message, ex, category, operation, fileName);
+                    }
+                    catch (Exception dbLogEx)
+                    {
+                        // 数据库日志失败不影响程序运行
+                        Serilog.Log.Warning(dbLogEx, "数据库日志记录失败");
+                    }
+                }
+            }
+            catch (Exception logEx)
+            {
+                // 日志记录失败不应该导致程序崩溃
+                try { Console.WriteLine($"日志记录失败: {logEx.Message}"); } catch { }
             }
         }
 
