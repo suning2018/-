@@ -453,7 +453,8 @@ namespace FtpExcelProcessor.Services
         {
             try
             {
-                var localFilePath = Path.Combine(_localPath, fileName);
+                // 使用绝对路径，避免相对路径在不同工作目录下的问题
+                var localFilePath = Path.Combine(Directory.GetCurrentDirectory(), _localPath, fileName);
 
                 // 如果文件已存在，跳过下载，但仍尝试删除FTP服务器上的文件
                 if (File.Exists(localFilePath))

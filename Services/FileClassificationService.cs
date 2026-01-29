@@ -66,6 +66,12 @@ namespace FtpExcelProcessor.Services
         /// </summary>
         private async Task<string> MoveFileAsync(string filePath, string fileType, bool isSuccess)
         {
+            // 确保使用绝对路径，避免相对路径在不同工作目录下的问题
+            if (!Path.IsPathRooted(filePath))
+            {
+                filePath = Path.Combine(Directory.GetCurrentDirectory(), filePath);
+            }
+
             if (!File.Exists(filePath))
             {
                 var error = $"要移动的文件不存在: {filePath}";
